@@ -1,0 +1,947 @@
+# ======================================================================
+# EurofficeGroup - local infrastructure for Power + Noodles
+#
+#   docker compose up -d                      # core: mssql, rabbit, redis, mailpit
+#   docker compose --profile db up -d         # + SQL Server
+#   docker compose --profile search up -d     # + Elasticsearch/Kibana
+#   docker compose up -d noodles-sales        # + one Noodles service
+#   docker compose --profile noodles up -d    # + all Noodles services + config-api
+#   docker compose --profile all up -d        # everything (heavy!)
+#
+# All memory/CPU limits live in .env; MSSQL_SA_PASSWORD lives in .env.local
+# (see .env.local.example). Bat scripts set COMPOSE_ENV_FILES=.env,.env.local.
+# ======================================================================
+
+networks:
+  hostnet:
+    name: hostnet
+
+volumes:
+  rabbit-data:
+  redis-data:
+  mssql-data:
+  elastic-data:
+
+services:
+
+  # ------------------------------------------------------------------
+  # RabbitMQ - local replacement for Azure Service Bus (NServiceBus transport)
+  # Power  : appSettings "Rabbit" = "host=localhost", "UseAzureServiceBus" = "false"
+  # Noodles: transport settings come from the Configuration API
+  # UI     : http://localhost:15672  (guest / guest)
+  # ------------------------------------------------------------------
+  rabbit:
+    container_name: rabbit
+    image: rabbitmq:3.13-management
+    hostname: rabbit-local
+    restart: unless-stopped
+    ports:
+      - "${RABBIT_PORT}:5672"
+      - "${RABBIT_UI_PORT}:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBIT_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBIT_PASS}
+      RABBITMQ_DEFAULT_VHOST: /
+      # The Erlang scheduler busy-waits by default, which parks an idle broker
+      # at whatever CPU allowance it is given. These flags turn that off; it
+      # costs a little latency, which is irrelevant on a dev box.
+      RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS: "+sbwt none +sbwtdcpu none +sbwtdio none"
+    volumes:
+      - rabbit-data:/var/lib/rabbitmq
+      - ./rabbitmq/rabbitmq.conf:/etc/rabbitmq/conf.d/10-local.conf:ro
+    networks: [hostnet]
+    mem_limit: ${RABBIT_MEM}
+    mem_reservation: ${RABBIT_MEM_RES}
+    cpus: ${RABBIT_CPUS}
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_running"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 40s
+
+  # ------------------------------------------------------------------
+  # Redis - local cache
+  # Power: appSettings "Cache" / "Redis.ConnectionString" = "localhost:6379,allowAdmin=true"
+  # databases=36000 - same as power/docker-compose.yml (per-dealer multitenancy)
+  # ------------------------------------------------------------------
+  redis:
+    container_name: redis
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: >
+      redis-server
+      --databases ${REDIS_DATABASES}
+      --maxmemory ${REDIS_MAXMEMORY}
+      --maxmemory-policy allkeys-lru
+      --appendonly no
+    ports:
+      - "${REDIS_PORT}:6379"
+    volumes:
+      - redis-data:/data
+    networks: [hostnet]
+    mem_limit: ${REDIS_MEM}
+    mem_reservation: ${REDIS_MEM_RES}
+    cpus: ${REDIS_CPUS}
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  # ------------------------------------------------------------------
+  # Mailpit - catches all outgoing mail, nothing leaves the machine
+  # SMTP: localhost:1025 (no auth)    UI: http://localhost:8025
+  # For Noodles.Email / Power email sending
+  # ------------------------------------------------------------------
+  mailpit:
+    container_name: mailpit
+    image: axllent/mailpit:latest
+    restart: unless-stopped
+    ports:
+      - "${SMTP_PORT}:1025"
+      - "${MAILPIT_UI_PORT}:8025"
+    environment:
+      MP_MAX_MESSAGES: 500
+      MP_SMTP_AUTH_ACCEPT_ANY: 1
+      MP_SMTP_AUTH_ALLOW_INSECURE: 1
+    networks: [hostnet]
+    mem_limit: ${MAILPIT_MEM}
+    mem_reservation: ${MAILPIT_MEM_RES}
+    cpus: ${MAILPIT_CPUS}
+
+  # ------------------------------------------------------------------
+  # SQL Server - core, not optional.
+  #
+  # Every EO service reads its settings from the Configuration API, and the
+  # Configuration API reads them from dbo.cfg_Configurations in a support centre
+  # database here. Nothing starts without it.
+  #
+  # Restore the group databases under their own names (test4_power_*) -
+  # see sql/test4/README.md.
+  # ------------------------------------------------------------------
+  mssql:
+    container_name: mssql
+    image: ${MSSQL_IMAGE}
+    restart: unless-stopped
+    user: root
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD}
+      MSSQL_PID: Developer
+      MSSQL_MEMORY_LIMIT_MB: ${MSSQL_MEMORY_LIMIT_MB}
+      MSSQL_AGENT_ENABLED: "true"
+    ports:
+      - "${MSSQL_PORT}:1433"
+    volumes:
+      - mssql-data:/var/opt/mssql
+      - ./sql/init:/init:ro
+      - ./sql/backup:/backup
+    networks: [hostnet]
+    mem_limit: ${MSSQL_MEM}
+    mem_reservation: ${MSSQL_MEM_RES}
+    cpus: ${MSSQL_CPUS}
+    healthcheck:
+      # works on both images: tools18 (2022) if present, tools (2019) otherwise
+      test: ["CMD-SHELL", "(/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P \"$$MSSQL_SA_PASSWORD\" -C -Q 'SELECT 1' || /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P \"$$MSSQL_SA_PASSWORD\" -Q 'SELECT 1') || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 15
+      start_period: 60s
+
+
+  # ==================================================================
+  # Applications
+  #
+  # Profile "noodles" - none of these start with a plain `up -d`.
+  #
+  #   docker compose up -d noodles-sales              one service
+  #   docker compose up -d noodles-sales noodles-email  a few
+  #   docker compose --profile noodles up -d          all of them
+  #   docker compose stop noodles-sales               stop just that one
+  #   docker compose logs -f noodles-sales            follow just that one
+  #
+  # Naming a service explicitly enables its profile, which is what makes
+  # single-service start work without touching the profile flag.
+  #
+  # All sixteen share one image; see docker/noodles.Dockerfile for why.
+  # Build it once:   docker compose build noodles-sales
+  #
+  # Running all sixteen needs roughly 8 GB. Start what you need.
+  #
+  # DEBUGGING: stop the container for the service you are working on and run
+  # that one project from Rider. It reaches the same containers by the same
+  # hostnames, because hosts-setup.ps1 points mssql/rabbit/redis/mailpit/
+  # config-api at 127.0.0.1 on this machine.
+  # ==================================================================
+
+  # ------------------------------------------------------------------
+  # Builds infra/noodles:local. Never started - it exists so that one service
+  # owns the build instead of all sixteen declaring the same one, which made
+  # a cold `up` fan out into sixteen identical builds.
+  #
+  #   docker compose build noodles-build config-api
+  #
+  # Rebuild after changing Noodles source; `up` alone will not rebuild an
+  # image that already exists.
+  # ------------------------------------------------------------------
+  noodles-build:
+    profiles: ["build"]
+    image: ${NOODLES_IMAGE}
+    build:
+      context: ../noodles
+      dockerfile: ../local-infra/docker/noodles.Dockerfile
+    entrypoint: ["true"]
+    networks: [hostnet]
+
+  # ------------------------------------------------------------------
+  # Configuration API - every Noodles endpoint calls this at startup.
+  # Part of the "noodles" profile because nothing below works without it.
+  # ------------------------------------------------------------------
+  config-api:
+    profiles: ["noodles", "apis", "all"]
+    container_name: config-api
+    hostname: ${LOCAL_HOSTNAME}
+    image: ${CONFIG_API_IMAGE}
+    build:
+      context: ../api.configuration
+      dockerfile: ../local-infra/docker/api-configuration.Dockerfile
+    restart: unless-stopped
+    environment:
+      # The group switch. {0} is replaced with the database role at runtime,
+      # so this instance opens ${INFRA_DB_PREFIX}_supportcentre.
+      Generic: "Data Source=mssql,1433;Initial Catalog=${INFRA_DB_PREFIX}_{0};User Id=EuroWebsite;Password=pensandpencils;Language=British;MultipleActiveResultSets=true;Encrypt=false;TrustServerCertificate=True;"
+      DealerGroup: ${INFRA_DEALER_GROUP}
+      Environment: ${INFRA_ENVIRONMENT}
+      ConfigurationApiPort: "8080"
+    ports:
+      - "${CONFIG_API_PORT}:8080"
+    depends_on:
+      mssql:
+        condition: service_healthy
+      rabbit:
+        condition: service_healthy
+    networks: [hostnet]
+    mem_limit: ${CONFIG_API_MEM}
+    mem_reservation: ${CONFIG_API_MEM_RES}
+    cpus: ${CONFIG_API_CPUS}
+
+  noodles-actions:
+    profiles: ["noodles", "all"]
+    container_name: noodles-actions
+    hostname: ${LOCAL_HOSTNAME}
+    image: ${NOODLES_IMAGE}
+    restart: unless-stopped
+    environment:
+      NOODLES_SERVICE: Noodles.Actions
+      ServiceName: noodles.actions
+      DealerGroup: ${INFRA_DEALER_GROUP}
+      Environment: ${INFRA_ENVIRONMENT}
+      ConfigurationUrl: ${CONFIGURATION_URL}
+    volumes:
+      # The shared file locations from the configuration. In the real estate
+      # these are Azure Files shares on \steostoragetestuks01...; here one
+      # host folder stands in for all of them, and the configuration points at
+      # /files (see sql/init/20-docker-overrides.sql).
+      - ./files:/files
+    depends_on:
+      config-api:
+        condition: service_healthy
+      rabbit:
+        condition: service_healthy
+      mssql:
+        condition: service_healthy
+    networks: [hostnet]
+    mem_limit: ${NOODLES_MEM}
+    mem_reservation: ${NOODLES_MEM_RES}
+    cpus: ${NOODLES_CPUS}
+
+  noodles-ai:
+    profiles: ["noodles", "all"]
+    container_name: noodles-ai
+    hostname: ${LOCAL_HOSTNAME}
+    image: ${NOODLES_IMAGE}
+    restart: unless-stopped
+    environment:
+      NOODLES_SERVICE: Noodles.Ai
+      ServiceName: noodles.ai
+      DealerGroup: ${INFRA_DEALER_GROUP}
+      Environment: ${INFRA_ENVIRONMENT}
+      ConfigurationUrl: ${CONFIGURATION_URL}
+    volumes:
+      # The shared file locations from the configuration. In the real estate
+      # these are Azure Files shares on \steostoragetestuks01...; here one
+      # host folder stands in for all of them, and the configuration points at
+      # /files (see sql/init/20-docker-overrides.sql).
+      - ./files:/files
+    depends_on:
+      config-api:
+        condition: service_healthy
+      rabbit:
+        condition: service_healthy
+      mssql:
+        condition: service_healthy
+    networks: [hostnet]
+    mem_limit: ${NOODLES_MEM}
+    mem_reservation: ${NOODLES_MEM_RES}
+    cpus: ${NOODLES_CPUS}
+
+  noodles-audience:
+    profiles: ["noodles", "all"]
+    container_name: noodles-audience
+    hostname: ${LOCAL_HOSTNAME}
+    image: ${NOODLES_IMAGE}
+    restart: unless-stopped
+    environment:
+      NOODLES_SERVICE: Noodles.Audience
+      ServiceName: noodles.audience
+      DealerGroup: ${INFRA_DEALER_GROUP}
+      Environment: ${INFRA_ENVIRONMENT}
+      ConfigurationUrl: ${CONFIGURATION_URL}
+    volumes:
+      # The shared file locations from the configuration. In the real estate
+      # these are Azure Files shares on \steostoragetestuks01...; here one
+      # host folder stands in for all of them, and the configuration points at
+      # /files (see sql/init/20-docker-overrides.sql).
+      - ./files:/files
+    depends_on:
+      config-api:
+        condition: service_healthy
+      rabbit:
+        condition: service_healthy
+      mssql:
+        condition: service_healthy
+    networks: [hostnet]
+    mem_limit: ${NOODLES_MEM}
+    mem_reservation: ${NOODLES_MEM_RES}
+    cpus: ${NOODLES_CPUS}
+
+  noodles-catalogues:
+    profiles: ["noodles", "all"]
+    container_name: noodles-catalogues
+    hostname: ${LOCAL_HOSTNAME}
+    image: ${NOODLES_IMAGE}
+    restart: unless-stopped
+    environment:
+      NOODLES_SERVICE: Noodles.Catalogues
+      ServiceName: noodles.catalogues
+      DealerGroup: ${INFRA_DEALER_GROUP}
+      Environment: ${INFRA_ENVIRONMENT}
+      ConfigurationUrl: ${CONFIGURATION_URL}
+    volumes:
+      # The shared file locations from the configuration. In the real estate
+      # these are Azure Files shares on \steostoragetestuks01...; here one
+      # host folder stands in for all of them, and the configuration points at
+      # /files (see sql/init/20-docker-overrides.sql).
+      - ./files:/files
+    depends_on:
+      config-api:
+        condition: service_healthy
+      rabbit:
+        condition: service_healthy
+      mssql:
+        condition: service_healthy
+    networks: [hostnet]
+    mem_limit: ${NOODLES_MEM}
+    mem_reservation: ${NOODLES_MEM_RES}
+    cpus: ${NOODLES_CPUS}
+
+  noodles-email:
+    profiles: ["noodles", "all"]
+    container_name: noodles-email
+    hostname: ${LOCAL_HOSTNAME}
+    image: ${NOODLES_IMAGE}
+    restart: unless-stopped
+    environment:
+      NOODLES_SERVICE: Noodles.Email
+      ServiceName: noodles.email
+      DealerGroup: ${INFRA_DEALER_GROUP}
+      Environment: ${INFRA_ENVIRONMENT}
+      ConfigurationUrl: ${CONFIGURATION_URL}
+    volumes:
+      # The shared file locations from the configuration. In the real estate
+      # these are Azure Files shares on \steostoragetestuks01...; here one
+      # host folder stands in for all of them, and the configuration points at
+      # /files (see sql/init/20-docker-overrides.sql).
+      - ./files:/files
+    depends_on:
+      config-api:
+        condition: service_healthy
+      rabbit:
+        condition: service_healthy
+      mssql:
+        condition: service_healthy
+    networks: [hostnet]
+    mem_limit: ${NOODLES_MEM}
+    mem_reservation: ${NOODLES_MEM_RES}
+    cpus: ${NOODLES_CPUS}
+
+  noodles-finance:
+    profiles: ["noodles", "all"]
+    container_name: noodles-finance
+    hostname: ${LOCAL_HOSTNAME}
+    image: ${NOODLES_IMAGE}
+    restart: unless-stopped
+    environment:
+      NOODLES_SERVICE: Noodles.Finance
+      ServiceName: noodles.finance
+      DealerGroup: ${INFRA_DEALER_GROUP}
+      Environment: ${INFRA_ENVIRONMENT}
+      ConfigurationUrl: ${CONFIGURATION_URL}
+    volumes:
+      # The shared file locations from the configuration. In the real estate
+      # these are Azure Files shares on \steostoragetestuks01...; here one
+      # host folder stands in for all of them, and the configuration points at
+      # /files (see sql/init/20-docker-overrides.sql).
+      - ./files:/files
+    depends_on:
+      config-api:
+        condition: service_healthy
+      rabbit:
+        condition: service_healthy
+      mssql:
+        condition: service_healthy
+    networks: [hostnet]
+    mem_limit: ${NOODLES_MEM}
+    mem_reservation: ${NOODLES_MEM_RES}
+    cpus: ${NOODLES_CPUS}
+
+  noodles-inventory:
+    profiles: ["noodles", "all"]
+    container_name: noodles-inventory
+    hostname: ${LOCAL_HOSTNAME}
+    image: ${NOODLES_IMAGE}
+    restart: unless-stopped
+    environment:
+      NOODLES_SERVICE: Noodles.Inventory
+      ServiceName: noodles.inventory
+      DealerGroup: ${INFRA_DEALER_GROUP}
+      Environment: ${INFRA_ENVIRONMENT}
+      ConfigurationUrl: ${CONFIGURATION_URL}
+    volumes:
+      # The shared file locations from the configuration. In the real estate
+      # these are Azure Files shares on \steostoragetestuks01...; here one
+      # host folder stands in for all of them, and the configuration points at
+      # /files (see sql/init/20-docker-overrides.sql).
+      - ./files:/files
+    depends_on:
+      config-api:
+        condition: service_healthy
+      rabbit:
+        condition: service_healthy
+      mssql:
+        condition: service_healthy
+    networks: [hostnet]
+    mem_limit: ${NOODLES_MEM}
+    mem_reservation: ${NOODLES_MEM_RES}
+    cpus: ${NOODLES_CPUS}
+
+  noodles-marketing:
+    profiles: ["noodles", "all"]
+    container_name: noodles-marketing
+    hostname: ${LOCAL_HOSTNAME}
+    image: ${NOODLES_IMAGE}
+    restart: unless-stopped
+    environment:
+      NOODLES_SERVICE: Noodles.Marketing
+      ServiceName: noodles.marketing
+      DealerGroup: ${INFRA_DEALER_GROUP}
+      Environment: ${INFRA_ENVIRONMENT}
+      ConfigurationUrl: ${CONFIGURATION_URL}
+    volumes:
+      # The shared file locations from the configuration. In the real estate
+      # these are Azure Files shares on \steostoragetestuks01...; here one
+      # host folder stands in for all of them, and the configuration points at
+      # /files (see sql/init/20-docker-overrides.sql).
+      - ./files:/files
+    depends_on:
+      config-api:
+        condition: service_healthy
+      rabbit:
+        condition: service_healthy
+      mssql:
+        condition: service_healthy
+    networks: [hostnet]
+    mem_limit: ${NOODLES_MEM}
+    mem_reservation: ${NOODLES_MEM_RES}
+    cpus: ${NOODLES_CPUS}
+
+  noodles-pdf:
+    profiles: ["noodles", "all"]
+    container_name: noodles-pdf
+    hostname: ${LOCAL_HOSTNAME}
+    image: ${NOODLES_IMAGE}
+    restart: unless-stopped
+    environment:
+      NOODLES_SERVICE: Noodles.Pdf
+      ServiceName: noodles.pdf
+      DealerGroup: ${INFRA_DEALER_GROUP}
+      Environment: ${INFRA_ENVIRONMENT}
+      ConfigurationUrl: ${CONFIGURATION_URL}
+    volumes:
+      # The shared file locations from the configuration. In the real estate
+      # these are Azure Files shares on \steostoragetestuks01...; here one
+      # host folder stands in for all of them, and the configuration points at
+      # /files (see sql/init/20-docker-overrides.sql).
+      - ./files:/files
+    depends_on:
+      config-api:
+        condition: service_healthy
+      rabbit:
+        condition: service_healthy
+      mssql:
+        condition: service_healthy
+    networks: [hostnet]
+    mem_limit: ${NOODLES_MEM}
+    mem_reservation: ${NOODLES_MEM_RES}
+    cpus: ${NOODLES_CPUS}
+
+  noodles-reporting:
+    profiles: ["noodles", "all"]
+    container_name: noodles-reporting
+    hostname: ${LOCAL_HOSTNAME}
+    image: ${NOODLES_IMAGE}
+    restart: unless-stopped
+    environment:
+      NOODLES_SERVICE: Noodles.Reporting
+      ServiceName: noodles.reporting
+      DealerGroup: ${INFRA_DEALER_GROUP}
+      Environment: ${INFRA_ENVIRONMENT}
+      ConfigurationUrl: ${CONFIGURATION_URL}
+    volumes:
+      # The shared file locations from the configuration. In the real estate
+      # these are Azure Files shares on \steostoragetestuks01...; here one
+      # host folder stands in for all of them, and the configuration points at
+      # /files (see sql/init/20-docker-overrides.sql).
+      - ./files:/files
+    depends_on:
+      config-api:
+        condition: service_healthy
+      rabbit:
+        condition: service_healthy
+      mssql:
+        condition: service_healthy
+    networks: [hostnet]
+    mem_limit: ${NOODLES_MEM}
+    mem_reservation: ${NOODLES_MEM_RES}
+    cpus: ${NOODLES_CPUS}
+
+  noodles-sales:
+    profiles: ["noodles", "all"]
+    container_name: noodles-sales
+    hostname: ${LOCAL_HOSTNAME}
+    image: ${NOODLES_IMAGE}
+    restart: unless-stopped
+    environment:
+      NOODLES_SERVICE: Noodles.Sales
+      ServiceName: noodles.sales
+      DealerGroup: ${INFRA_DEALER_GROUP}
+      Environment: ${INFRA_ENVIRONMENT}
+      ConfigurationUrl: ${CONFIGURATION_URL}
+    volumes:
+      # The shared file locations from the configuration. In the real estate
+      # these are Azure Files shares on \steostoragetestuks01...; here one
+      # host folder stands in for all of them, and the configuration points at
+      # /files (see sql/init/20-docker-overrides.sql).
+      - ./files:/files
+    depends_on:
+      config-api:
+        condition: service_healthy
+      rabbit:
+        condition: service_healthy
+      mssql:
+        condition: service_healthy
+    networks: [hostnet]
+    mem_limit: ${NOODLES_MEM}
+    mem_reservation: ${NOODLES_MEM_RES}
+    cpus: ${NOODLES_CPUS}
+
+  noodles-schedulecoordinator:
+    profiles: ["noodles", "all"]
+    container_name: noodles-schedulecoordinator
+    hostname: ${LOCAL_HOSTNAME}
+    image: ${NOODLES_IMAGE}
+    restart: unless-stopped
+    environment:
+      NOODLES_SERVICE: Noodles.ScheduleCoordinator
+      ServiceName: noodles.schedulecoordinator
+      DealerGroup: ${INFRA_DEALER_GROUP}
+      Environment: ${INFRA_ENVIRONMENT}
+      ConfigurationUrl: ${CONFIGURATION_URL}
+    volumes:
+      # The shared file locations from the configuration. In the real estate
+      # these are Azure Files shares on \steostoragetestuks01...; here one
+      # host folder stands in for all of them, and the configuration points at
+      # /files (see sql/init/20-docker-overrides.sql).
+      - ./files:/files
+    depends_on:
+      config-api:
+        condition: service_healthy
+      rabbit:
+        condition: service_healthy
+      mssql:
+        condition: service_healthy
+    networks: [hostnet]
+    mem_limit: ${NOODLES_MEM}
+    mem_reservation: ${NOODLES_MEM_RES}
+    cpus: ${NOODLES_CPUS}
+
+  noodles-segmentation:
+    profiles: ["noodles", "all"]
+    container_name: noodles-segmentation
+    hostname: ${LOCAL_HOSTNAME}
+    image: ${NOODLES_IMAGE}
+    restart: unless-stopped
+    environment:
+      NOODLES_SERVICE: Noodles.Segmentation
+      ServiceName: noodles.segmentation
+      DealerGroup: ${INFRA_DEALER_GROUP}
+      Environment: ${INFRA_ENVIRONMENT}
+      ConfigurationUrl: ${CONFIGURATION_URL}
+    volumes:
+      # The shared file locations from the configuration. In the real estate
+      # these are Azure Files shares on \steostoragetestuks01...; here one
+      # host folder stands in for all of them, and the configuration points at
+      # /files (see sql/init/20-docker-overrides.sql).
+      - ./files:/files
+    depends_on:
+      config-api:
+        condition: service_healthy
+      rabbit:
+        condition: service_healthy
+      mssql:
+        condition: service_healthy
+    networks: [hostnet]
+    mem_limit: ${NOODLES_MEM}
+    mem_reservation: ${NOODLES_MEM_RES}
+    cpus: ${NOODLES_CPUS}
+
+  noodles-statistics:
+    profiles: ["noodles", "all"]
+    container_name: noodles-statistics
+    hostname: ${LOCAL_HOSTNAME}
+    image: ${NOODLES_IMAGE}
+    restart: unless-stopped
+    environment:
+      NOODLES_SERVICE: Noodles.Statistics
+      ServiceName: noodles.statistics
+      DealerGroup: ${INFRA_DEALER_GROUP}
+      Environment: ${INFRA_ENVIRONMENT}
+      ConfigurationUrl: ${CONFIGURATION_URL}
+    volumes:
+      # The shared file locations from the configuration. In the real estate
+      # these are Azure Files shares on \steostoragetestuks01...; here one
+      # host folder stands in for all of them, and the configuration points at
+      # /files (see sql/init/20-docker-overrides.sql).
+      - ./files:/files
+    depends_on:
+      config-api:
+        condition: service_healthy
+      rabbit:
+        condition: service_healthy
+      mssql:
+        condition: service_healthy
+    networks: [hostnet]
+    mem_limit: ${NOODLES_MEM}
+    mem_reservation: ${NOODLES_MEM_RES}
+    cpus: ${NOODLES_CPUS}
+
+  noodles-transport:
+    profiles: ["noodles", "all"]
+    container_name: noodles-transport
+    hostname: ${LOCAL_HOSTNAME}
+    image: ${NOODLES_IMAGE}
+    restart: unless-stopped
+    environment:
+      NOODLES_SERVICE: Noodles.Transport
+      ServiceName: noodles.transport
+      DealerGroup: ${INFRA_DEALER_GROUP}
+      Environment: ${INFRA_ENVIRONMENT}
+      ConfigurationUrl: ${CONFIGURATION_URL}
+    volumes:
+      # The shared file locations from the configuration. In the real estate
+      # these are Azure Files shares on \steostoragetestuks01...; here one
+      # host folder stands in for all of them, and the configuration points at
+      # /files (see sql/init/20-docker-overrides.sql).
+      - ./files:/files
+    depends_on:
+      config-api:
+        condition: service_healthy
+      rabbit:
+        condition: service_healthy
+      mssql:
+        condition: service_healthy
+    networks: [hostnet]
+    mem_limit: ${NOODLES_MEM}
+    mem_reservation: ${NOODLES_MEM_RES}
+    cpus: ${NOODLES_CPUS}
+
+  noodles-uploaders:
+    profiles: ["noodles", "all"]
+    container_name: noodles-uploaders
+    hostname: ${LOCAL_HOSTNAME}
+    image: ${NOODLES_IMAGE}
+    restart: unless-stopped
+    environment:
+      NOODLES_SERVICE: Noodles.Uploaders
+      ServiceName: noodles.uploaders
+      DealerGroup: ${INFRA_DEALER_GROUP}
+      Environment: ${INFRA_ENVIRONMENT}
+      ConfigurationUrl: ${CONFIGURATION_URL}
+    volumes:
+      # The shared file locations from the configuration. In the real estate
+      # these are Azure Files shares on \steostoragetestuks01...; here one
+      # host folder stands in for all of them, and the configuration points at
+      # /files (see sql/init/20-docker-overrides.sql).
+      - ./files:/files
+    depends_on:
+      config-api:
+        condition: service_healthy
+      rabbit:
+        condition: service_healthy
+      mssql:
+        condition: service_healthy
+    networks: [hostnet]
+    mem_limit: ${NOODLES_MEM}
+    mem_reservation: ${NOODLES_MEM_RES}
+    cpus: ${NOODLES_CPUS}
+
+  # ==================================================================
+  # Profile: apis - the small satellite APIs the sites call directly
+  #
+  #   docker compose --profile apis up -d
+  #
+  # WHY THEY ARE HERE. Unlike the database, these are not needed for the sites
+  # to start - the IIS sites will happily call TEST4's copies over the VPN. That
+  # is exactly the problem: every basket render fans out into several round
+  # trips at ~70 ms each, which is where the remaining slowness comes from.
+  # Running them here turns those into local calls.
+  #
+  # PORTS ARE FIXED, NOT CHOSEN. WebConfigPicker writes these numbers into each
+  # site's web.config when you tick "Use local" (MainWindow.xaml.cs:595-625), so
+  # the containers have to listen on exactly them. They are published on the
+  # host because the callers - IIS, and Noodles containers via host.docker.internal
+  # - are not all inside this network.
+  #
+  #   9000  pricing
+  #   9005  tax
+  #   9020  product        also answers /DeliveryCharge - one service, one repo
+  #   9050  payments       see the note on the service below
+  #   9100  audience
+  #   9012  search         NOT here: that is the Elasticsearch API, deliberately
+  #                        left on TEST4 (the index is too big to host locally)
+  #
+  # Each is built from its own repo checked out next to this one. Missing ones:
+  #   .\clone-apis.ps1
+  # ==================================================================
+
+  api-tax:
+    profiles: ["apis", "all"]
+    container_name: api-tax
+    image: ${TAX_API_IMAGE}
+    build:
+      context: ../api.tax
+      dockerfile: ../local-infra/docker/api-service.Dockerfile
+      args:
+        PROJECT: src/EurofficeGroup.Api.Tax
+        ENTRY: EurofficeGroup.Api.Tax.dll
+        PORT: "9005"
+    restart: unless-stopped
+    environment:
+      DealerGroup: ${INFRA_DEALER_GROUP}
+      Environment: ${INFRA_ENVIRONMENT}
+      ConfigurationUrl: ${CONFIGURATION_URL}
+      # The key name Program.cs passes to ConfigureEoWebHostUsingStartup.
+      TaxApiPort: "9005"
+    ports:
+      - "${TAX_API_PORT}:9005"
+    volumes:
+      - ./files:/files
+    depends_on:
+      config-api:
+        condition: service_healthy
+      rabbit:
+        condition: service_healthy
+    networks: [hostnet]
+    mem_limit: ${API_MEM}
+    mem_reservation: ${API_MEM_RES}
+    cpus: ${API_CPUS}
+
+  api-pricing:
+    profiles: ["apis", "all"]
+    container_name: api-pricing
+    image: ${PRICING_API_IMAGE}
+    build:
+      context: ../api.pricing
+      dockerfile: ../local-infra/docker/api-service.Dockerfile
+      args:
+        PROJECT: src/EurofficeGroup.Api.Pricing
+        ENTRY: EurofficeGroup.Api.Pricing.dll
+        PORT: "9000"
+    restart: unless-stopped
+    environment:
+      DealerGroup: ${INFRA_DEALER_GROUP}
+      Environment: ${INFRA_ENVIRONMENT}
+      ConfigurationUrl: ${CONFIGURATION_URL}
+      PricingApiPort: "9000"
+    ports:
+      - "${PRICING_API_PORT}:9000"
+    volumes:
+      - ./files:/files
+    depends_on:
+      config-api:
+        condition: service_healthy
+      rabbit:
+        condition: service_healthy
+    networks: [hostnet]
+    mem_limit: ${API_MEM}
+    mem_reservation: ${API_MEM_RES}
+    cpus: ${API_CPUS}
+
+  # Product also serves DeliveryCharge - one process, two route prefixes, which
+  # is why the picker points both DeliveryChargeApiServiceUrl and
+  # ProductApiServiceUrl at 9020 and there is no separate Delivery Charge repo.
+  api-product:
+    profiles: ["apis", "all"]
+    container_name: api-product
+    image: ${PRODUCT_API_IMAGE}
+    build:
+      context: ../api.product
+      dockerfile: ../local-infra/docker/api-service.Dockerfile
+      args:
+        PROJECT: src/EurofficeGroup.Api.Product
+        ENTRY: EurofficeGroup.Api.Product.dll
+        PORT: "9020"
+    restart: unless-stopped
+    environment:
+      DealerGroup: ${INFRA_DEALER_GROUP}
+      Environment: ${INFRA_ENVIRONMENT}
+      ConfigurationUrl: ${CONFIGURATION_URL}
+      ProductApiPort: "9020"
+    ports:
+      - "${PRODUCT_API_PORT}:9020"
+    volumes:
+      - ./files:/files
+    depends_on:
+      config-api:
+        condition: service_healthy
+      rabbit:
+        condition: service_healthy
+    networks: [hostnet]
+    mem_limit: ${API_MEM}
+    mem_reservation: ${API_MEM_RES}
+    cpus: ${API_CPUS}
+
+  api-audience:
+    profiles: ["apis", "all"]
+    container_name: api-audience
+    image: ${AUDIENCE_API_IMAGE}
+    build:
+      context: ../api.audience
+      dockerfile: ../local-infra/docker/api-service.Dockerfile
+      args:
+        PROJECT: src/EurofficeGroup.Api.Audience
+        ENTRY: EurofficeGroup.Api.Audience.dll
+        PORT: "9100"
+    restart: unless-stopped
+    environment:
+      DealerGroup: ${INFRA_DEALER_GROUP}
+      Environment: ${INFRA_ENVIRONMENT}
+      ConfigurationUrl: ${CONFIGURATION_URL}
+      AudienceApiPort: "9100"
+    ports:
+      - "${AUDIENCE_API_PORT}:9100"
+    volumes:
+      - ./files:/files
+    depends_on:
+      config-api:
+        condition: service_healthy
+      rabbit:
+        condition: service_healthy
+    networks: [hostnet]
+    mem_limit: ${API_MEM}
+    mem_reservation: ${API_MEM_RES}
+    cpus: ${API_CPUS}
+
+  # 9050, not 9052. WebConfigPicker disagrees with itself: the branch that
+  # writes the SERVICE config sets PaymentsApiPort=9050, while the branch that
+  # writes the SITES' web.config sets PaymentsApiServiceUrl to :9052
+  # (MainWindow.xaml.cs:620 vs :798). 9050 is the real one - it is the fallback
+  # compiled into PaymentsApiInstaller in power and noodles. power-local-setup.ps1
+  # rewrites the sites to 9050 so the two ends meet.
+  api-payments:
+    profiles: ["apis", "all"]
+    container_name: api-payments
+    image: ${PAYMENTS_API_IMAGE}
+    build:
+      context: ../api.payments
+      dockerfile: ../local-infra/docker/api-service.Dockerfile
+      args:
+        PROJECT: src/EurofficeGroup.Api.Payments
+        ENTRY: EurofficeGroup.Api.Payments.dll
+        PORT: "9050"
+    restart: unless-stopped
+    environment:
+      DealerGroup: ${INFRA_DEALER_GROUP}
+      Environment: ${INFRA_ENVIRONMENT}
+      ConfigurationUrl: ${CONFIGURATION_URL}
+      PaymentsApiPort: "9050"
+    ports:
+      - "${PAYMENTS_API_PORT}:9050"
+    volumes:
+      - ./files:/files
+    depends_on:
+      config-api:
+        condition: service_healthy
+      rabbit:
+        condition: service_healthy
+    networks: [hostnet]
+    mem_limit: ${API_MEM}
+    mem_reservation: ${API_MEM_RES}
+    cpus: ${API_CPUS}
+
+  # ==================================================================
+  # Profile: search - Elasticsearch + Kibana
+  # Version 7.9.2 - same as power/Docker-builds/Elastic/docker-compose.yml
+  # ==================================================================
+  elastic:
+    profiles: ["search", "all"]
+    container_name: elastic
+    image: docker.elastic.co/elasticsearch/elasticsearch:7.9.2
+    restart: unless-stopped
+    environment:
+      - discovery.type=single-node
+      - bootstrap.memory_lock=false
+      - "ES_JAVA_OPTS=-Xms${ELASTIC_HEAP} -Xmx${ELASTIC_HEAP}"
+      - xpack.security.enabled=false
+    ports:
+      - "${ELASTIC_PORT}:9200"
+    volumes:
+      - elastic-data:/usr/share/elasticsearch/data
+    networks: [hostnet]
+    mem_limit: ${ELASTIC_MEM}
+    mem_reservation: ${ELASTIC_MEM_RES}
+    cpus: ${ELASTIC_CPUS}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+
+  kibana:
+    profiles: ["search", "all"]
+    container_name: kibana
+    image: docker.elastic.co/kibana/kibana:7.9.2
+    restart: unless-stopped
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elastic:9200
+    ports:
+      - "${KIBANA_PORT}:5601"
+    depends_on:
+      elastic:
+        condition: service_healthy
+    networks: [hostnet]
+    mem_limit: ${KIBANA_MEM}
+    mem_reservation: ${KIBANA_MEM_RES}
+    cpus: ${KIBANA_CPUS}

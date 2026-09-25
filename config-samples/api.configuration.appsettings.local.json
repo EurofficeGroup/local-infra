@@ -1,0 +1,39 @@
+{
+  "_comment": [
+    "Drop-in replacement for",
+    "  api.configuration/src/EurofficeGroup.Api.Configuration.Service/appsettings.json",
+    "when the Configuration API should talk to the SQL Server from this compose file.",
+    "",
+    "THIS FILE IS THE GROUP SWITCH.",
+    "",
+    "'Generic' carries the <env>_<group> prefix. {0} is replaced at runtime with",
+    "the database role - ConnectionProvider.DefaultDatabase is 'supportcentre',",
+    "so this instance opens test4_power_supportcentre.",
+    "",
+    "To work against a different group, restore that group's .bak files and change",
+    "two values here, then restart the API. Nothing else moves:",
+    "",
+    "   power (pow)   Initial Catalog=test4_power_{0}   DealerGroup: pow",
+    "   euroffice     Initial Catalog=test4_eo_{0}      DealerGroup: eog",
+    "   ei            Initial Catalog=test4_ei_{0}      DealerGroup: ei0",
+    "",
+    "Port 8080 matches ConfigurationUrl in every Noodles appsettings.json.",
+    "",
+    "Only 'Generic' differs from what the repo ships - the repo has",
+    "Data Source=. and the dev_uk_{0} prefix."
+  ],
+  "Logging": {
+    "LogLevel": {
+      "Default": "Information",
+      "Microsoft": "Warning",
+      "Microsoft.Hosting.Lifetime": "Information"
+    }
+  },
+  "AllowedHosts": "*",
+  "DealerGroup": "pow",
+  "Environment": "local",
+  "ConfigChangeInterval": "00:00:30",
+  "Generic": "Data Source=localhost,1433;Initial Catalog=test4_power_{0};User Id=EuroWebsite;Password=pensandpencils;Language=British;MultipleActiveResultSets=true;Encrypt=false;TrustServerCertificate=True;",
+  "ConfigurationApiPort": "8080",
+  "AzureKeyVaultSecretsSource.KeyVaultUrl": ""
+}

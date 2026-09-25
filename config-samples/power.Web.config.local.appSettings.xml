@@ -1,0 +1,55 @@
+<!--
+  Sample <appSettings> block for running the Power sites locally.
+
+  Applies to:
+    power/EurofficeGroup.Web.FrontEnd/Web.config
+    power/EurofficeGroup.Web.Portal/Web.config
+    power/EurofficeGroup.Web.Support/Web.config
+    power/EurofficeGroup.Web.Static/Web.config
+
+  Do NOT hand-edit those Web.config files - that is what WebConfigPicker
+  (C:\workspace\webconfigpicker) is for. This file exists so you can see
+  which values the local variant is supposed to have.
+
+  Differences from the test6 config currently committed in the repo are
+  marked with  <!== LOCAL ==>
+-->
+<appSettings>
+  <!== LOCAL ==> A dealer from the 'pow' group, not eo0.
+       The committed value is eo0/eog because the repo ships the test6 config.
+       The databases restored from TEST4 keep their own names, so the power
+       group's dealers are test4_power_idl and test4_power_jst. Switch group by
+       changing DealerGroup here and the Generic prefix in the Configuration
+       API's appsettings.json - see sql/test4/README.md. -->
+  <add key="DealerId" value="idl" />
+
+  <!== LOCAL ==> Configuration API runs locally, not on vm-test-uks-06 -->
+  <add key="ConfigurationUrl" value="http://localhost:8080/Configuration" />
+
+  <!== LOCAL ==> -->
+  <add key="DealerGroup" value="pow" />
+
+  <!== LOCAL ==> -->
+  <add key="Environment" value="local" />
+
+  <add key="webpages:Version" value="3.0.0.0" />
+  <add key="webpages:Enabled" value="false" />
+  <add key="PreserveLoginUrl" value="true" />
+  <add key="ClientValidationEnabled" value="true" />
+  <add key="UnobtrusiveJavaScriptEnabled" value="true" />
+  <add key="enableSimpleMembership" value="false" />
+  <add key="autoFormsAuthentication" value="false" />
+  <add key="SiteContentCdnUrl" value="http://cdn" />
+  <add key="ApplicationBaseUrl" value="http://wfe" />
+
+  <!== LOCAL ==> Redis from docker-compose instead of redis-test-1/2.datacentre -->
+  <add key="Cache" value="localhost:6379,allowAdmin=true" />
+  <add key="Redis.ConnectionString" value="localhost:6379,allowAdmin=true" />
+
+  <!-- Locally Service Bus is not used at all - RabbitMQ only -->
+  <add key="UseAzureServiceBus" value="false" />
+  <add key="Rabbit" value="host=localhost;username=guest;password=guest" />
+
+  <add key="IdentityClientId" value="" />
+  <add key="Generic.ForceIntegratedSecurity" value="true" />
+</appSettings>

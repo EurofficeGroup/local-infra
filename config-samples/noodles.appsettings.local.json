@@ -1,0 +1,14 @@
+{
+  "_comment": [
+    "Sample appsettings.json for any Noodles service running locally.",
+    "Change ServiceName per service (noodles.sales, noodles.actions, ...).",
+    "The actual connection strings (SQL, Rabbit, Redis) do NOT come from here -",
+    "Noodles pulls them from the Configuration API at ConfigurationUrl.",
+    "See README, 'Configuration API'."
+  ],
+  "ServiceName": "noodles.sales",
+  "Environment": "local",
+  "DealerGroup": "pow",
+  "ConfigurationUrl": "http://localhost:8080/Configuration",
+  "EnableInstallers": true
+}

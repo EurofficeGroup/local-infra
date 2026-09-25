@@ -1,0 +1,61 @@
+# ======================================================================
+# local-infra
+# ======================================================================
+
+# --- SQL backups / exports (large binaries; place .bak files locally) ---
+sql/backup/*
+!sql/backup/.gitkeep
+*.bak
+*.bacpac
+
+# --- Machine-local secrets / overrides (never commit) ---
+# Create from .env.local.example — must contain MSSQL_SA_PASSWORD
+.env.local
+.env.*.local
+
+# --- Generated / scratch (Confluence paste, one-off helpers) ---
+README.confluence.html
+README.confluence.*
+_*.py
+_*.js
+_*.json
+_*.txt
+_*.out
+
+# --- IDE / editors ---
+.idea/
+.vscode/
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+*.DotSettings.user
+
+# --- OS ---
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.DS_Store
+$RECYCLE.BIN/
+
+# --- Logs / temp ---
+*.log
+*.tmp
+*.temp
+*~
+*.swp
+*.bak~
+*.orig
+
+# --- Python (if any local helpers) ---
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+.venv/
+venv/
+.env/
+
+# --- Docker local noise ---
+*.override.local.yml
