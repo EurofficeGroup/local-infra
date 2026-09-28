@@ -66,6 +66,7 @@ Runtime config for DB-driven keys is **not** read from `appsettings.json` — it
 | `power-local-setup.ps1` | After WebConfigPicker (elevated) | Sets `ConfigurationUrl`, `ForceIntegratedSecurity=false`, local API URLs |
 | `setup-local.bat` | From scratch | Runs the above in order (except manual Power) |
 | `ops-local.bat` | Day-to-day | Rebuild/restart noodles, config-api, APIs; re-run overrides; reset tasks |
+| `cleanup-local.bat` | When disk is full | Prunes **this project's** build cache + unused images (compose label); never touches volumes, running containers, or other Docker apps |
 
 ---
 
@@ -321,8 +322,26 @@ Two batch files cover two different jobs:
 |---|---|
 | `setup-local.bat` | **First-time / from-zero install** — hosts, core Docker, SQL restore, image build, noodles, scheduled tasks |
 | `ops-local.bat` | **Everyday maintenance** when the stack is already running — rebuild or restart only what changed |
+| `cleanup-local.bat` | **Free disk space** — only this compose project's unused build cache/images; keeps volumes, running infra, and other Docker apps |
 
 `ops-local.bat` does **not** restore databases, does **not** wipe volumes, and does **not** replace a failed install. After a broken setup, use `setup-local.bat --wipe` instead.
+
+### Disk cleanup (`cleanup-local.bat`)
+
+After repeated `noodles-rebuild` / `apis-rebuild`, this project's BuildKit cache and superseded `infra/*:local` images grow inside `%LOCALAPPDATA%\Docker\wsl\disk\docker_data.vhdx`. Run:
+
+```bat
+cleanup-local.bat
+```
+
+Requires `mssql`, `rabbit`, and `redis` to already be running. Cleanup is scoped with  
+`label=com.docker.compose.project=<COMPOSE_PROJECT_NAME>` (default `local-infra` from `.env`):
+
+- `docker builder prune` — only this project's build cache
+- `docker container prune` — only stopped containers of this project
+- `docker image prune` — only unused images built by this project
+
+It does **not** run global `docker system prune`. Volumes and other stacks on the machine stay untouched.
 
 ### When to use which action
 

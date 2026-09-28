@@ -197,17 +197,17 @@ if not "%SVC_ARG%"=="" (
 echo Recreating all noodles-* containers config-api left alone ...
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "$ErrorActionPreference='Stop';" ^
-  "$svcs = docker compose config --services | Where-Object { $_ -like 'noodles-*' };" ^
+  "$svcs = docker compose --profile noodles config --services | Where-Object { $_ -like 'noodles-*' -and $_ -ne 'noodles-build' };" ^
   "if (-not $svcs) { throw 'No noodles-* services found in compose.' };" ^
   "Write-Host ('  ' + ($svcs -join ', '));" ^
-  "docker compose up -d --force-recreate --no-deps @svcs;" ^
+  "docker compose --profile noodles up -d --force-recreate --no-deps @svcs;" ^
   "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }"
 exit /b %ERRORLEVEL%
 
 :recreate_one_noodles
 set "ONE=noodles-%~1"
 echo Recreating %ONE% ...
-docker compose up -d --force-recreate --no-deps %ONE%
+docker compose --profile noodles up -d --force-recreate --no-deps %ONE%
 exit /b %ERRORLEVEL%
 
 :read_env
