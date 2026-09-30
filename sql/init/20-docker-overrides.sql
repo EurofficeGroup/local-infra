@@ -214,6 +214,12 @@ INSERT INTO #flat (name, value) VALUES
     (N'Cache',                   @Redis),
     (N'Redis.ConnectionString',  @Redis),
 
+    -- Power IIS Debug builds pass debug=true into RegisterRedis* which appends
+    -- Dns.GetHostName() to RedisCachePrefix. Docker APIs are Release and do not.
+    -- Without this, Portal eviction DELs {JST_test4-power_<HOST>_…} while
+    -- api.audience wrote {JST_test4-power_…} — EXISTS stays 1 after SaveAudience.
+    (N'Redis.AppendHostNameToCachePrefix', N'false'),
+
     -- EMAIL. This is the most dangerous part of a restored configuration.
     -- TEST4 power points at a real provider:
     --     Default.Service          = SmtpRemoteEmailService
@@ -228,6 +234,11 @@ INSERT INTO #flat (name, value) VALUES
     -- is real, and the recipients in the restored data are real customers.
     -- Redirect it at Mailpit, which accepts anything and forwards nothing.
     (N'Default.Service',         N'SmtpRemoteEmailService'),
+    -- ServiceInstaller resolves IEmailService via GetParsedWithPrefix("EmailSettings"),
+    -- so the key must be EmailSettings.Default.Service. Without it the default is
+    -- SmtpPickupEmailService and Send fails with "Only absolute directories are allowed
+    -- for pickup directory" (no Windows pickup path inside the container).
+    (N'EmailSettings.Default.Service', N'SmtpRemoteEmailService'),
     (N'RemoteService.Host',      @SmtpHost),
     (N'RemoteService.Port',      @SmtpPort),
     (N'RemoteService.Secure',    N'False'),
@@ -238,13 +249,14 @@ INSERT INTO #flat (name, value) VALUES
     -- Noodles gateway/uploader hosts
     (N'NoodlesActionsServer',    N'noodles-actions'),
     (N'NoodlesGatewayServer_0',  N'localhost'),
-    (N'NoodlesUploadersServer_0',N'noodles-uploaders');
+    (N'NoodlesUploadersServer_0',N'noodles-uploaders'),
+
+    -- TEST4 restores leave FilterEmails=true with a whitelist that drops almost
+    -- every address (Leave, never hits SMTP). Mailpit is already the boundary
+    -- locally, so turn the filter off.
+    (N'FilterEmails',            N'false');
 
 -- Keys deliberately NOT touched:
---   FilterEmails         - switching it on activates EmailFilterForTestEnvironments,
---                          which needs an allow-list file (C:\AllowedEmailList.txt by
---                          default). Mailpit is already a hard boundary; a half-configured
---                          filter is a new failure mode, not extra safety.
 --   ElasticSearchConnectionString - left pointing at elastic-test-lb.euroffice.co.uk.
 --                          An earlier version of this comment claimed no such key existed
 --                          and that search here is only Endeca. It does exist.
