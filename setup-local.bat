@@ -12,6 +12,9 @@ rem    setup-local.bat
 rem    setup-local.bat --wipe
 rem    setup-local.bat --skip-hosts --skip-build
 rem    setup-local.bat --apis --power
+rem
+rem  On failure the script prints the concrete cause, how to fix it, recent
+rem  container logs where relevant, and the right command to retry with.
 rem ======================================================================
 
 cd /d "%~dp0"
@@ -24,6 +27,15 @@ set "SKIP_NOODLES=0"
 set "DO_APIS=0"
 set "DO_POWER=0"
 
+rem Error report fields, read by :fail (see Helpers).
+set "ORIG_ARGS=%*"
+set "ERR_MSG="
+set "ERR_HINT="
+set "ERR_HINT2="
+set "ERR_LOGS="
+set "ERR_WIPE=0"
+set "REASON_FILE=%TEMP%\local-infra-setup-reason.txt"
+
 :parse_args
 if "%~1"=="" goto args_done
 if /i "%~1"=="--wipe"         set "DO_WIPE=1"      & shift & goto parse_args
@@ -33,17 +45,18 @@ if /i "%~1"=="--skip-build"   set "SKIP_BUILD=1"   & shift & goto parse_args
 if /i "%~1"=="--skip-noodles" set "SKIP_NOODLES=1" & shift & goto parse_args
 if /i "%~1"=="--apis"         set "DO_APIS=1"      & shift & goto parse_args
 if /i "%~1"=="--power"        set "DO_POWER=1"     & shift & goto parse_args
-echo Unknown argument: %~1
-echo Usage: setup-local.bat [--wipe] [--skip-hosts] [--skip-restore] [--skip-build] [--skip-noodles] [--apis] [--power]
-call :fail_pause
-exit /b 1
+set "ERR_MSG=Unknown argument: %~1"
+set "ERR_HINT=Usage: setup-local.bat [--wipe] [--skip-hosts] [--skip-restore] [--skip-build] [--skip-noodles] [--apis] [--power]"
+set "ORIG_ARGS="
+goto fail
 :args_done
 
+rem ---------- .env.local / password ----------
 if not exist "%~dp0.env.local" (
-  echo ERROR: Missing .env.local
-  echo Copy .env.local.example to .env.local and set MSSQL_SA_PASSWORD.
-  call :fail_pause
-  exit /b 1
+  set "ERR_MSG=File .env.local is missing in %~dp0"
+  set "ERR_HINT=Run:  Copy-Item .env.local.example .env.local   then set MSSQL_SA_PASSWORD in it."
+  if not exist "%~dp0.env.local.example" set "ERR_HINT2=.env.local.example is missing too - restore it with:  git checkout -- .env.local.example"
+  goto fail
 )
 
 rem Compose interpolates ${MSSQL_SA_PASSWORD} from .env.local (not from .env).
@@ -52,11 +65,20 @@ set "COMPOSE_ENV_FILES=.env,.env.local"
 call :read_env MSSQL_SA_PASSWORD
 call :read_env INFRA_DB_PREFIX
 if not defined MSSQL_SA_PASSWORD (
-  echo ERROR: MSSQL_SA_PASSWORD is not set in .env.local
-  echo Copy .env.local.example to .env.local and set the password.
-  call :fail_pause
-  exit /b 1
+  findstr /c:"MSSQL_SA_PASSWORD" "%~dp0.env.local" >nul 2>&1
+  if errorlevel 1 (
+    set "ERR_MSG=.env.local has no MSSQL_SA_PASSWORD line."
+    set "ERR_HINT=Add a line  MSSQL_SA_PASSWORD=YourStrongPassword  - see .env.local.example."
+  ) else (
+    set "ERR_MSG=MSSQL_SA_PASSWORD in .env.local is empty or unreadable."
+    set "ERR_HINT=The line must start at column 1 as MSSQL_SA_PASSWORD=value, with no spaces around '='."
+    set "ERR_HINT2=If it already looks right, re-save .env.local as UTF-8 without BOM, e.g. in Notepad."
+  )
+  goto fail
 )
+call :check_password
+if errorlevel 1 goto fail
+
 if not defined INFRA_DB_PREFIX set "INFRA_DB_PREFIX=test4_power"
 set "SUPPORT_CENTRE=%INFRA_DB_PREFIX%_supportcentre"
 set "SQLCMD=/opt/mssql-tools18/bin/sqlcmd"
@@ -69,15 +91,21 @@ echo.
 rem ---------- prerequisites ----------
 where docker >nul 2>&1
 if errorlevel 1 (
-  echo ERROR: docker is not on PATH. Install Docker Desktop and try again.
-  call :fail_pause
-  exit /b 1
+  set "ERR_MSG=docker is not on PATH."
+  set "ERR_HINT=Install Docker Desktop, then open a new terminal so PATH is refreshed."
+  goto fail
 )
 docker info >nul 2>&1
 if errorlevel 1 (
-  echo ERROR: Docker daemon is not running. Start Docker Desktop and try again.
-  call :fail_pause
-  exit /b 1
+  set "ERR_MSG=Docker daemon is not reachable - Docker Desktop is not running or still starting."
+  set "ERR_HINT=Start Docker Desktop and wait until it shows 'Engine running', then retry."
+  goto fail
+)
+docker info --format "{{.OSType}}" 2>nul | findstr /i "linux" >nul
+if errorlevel 1 (
+  set "ERR_MSG=Docker is in Windows-containers mode; this stack needs Linux containers."
+  set "ERR_HINT=Docker Desktop tray icon - 'Switch to Linux containers...', then retry."
+  goto fail
 )
 
 rem ---------- 0. wipe to zero optional / on every failed retry ----------
@@ -85,9 +113,9 @@ if "%DO_WIPE%"=="1" (
   echo [0/8] Wiping stack and volumes to zero ...
   docker compose --profile all down -v --remove-orphans
   if errorlevel 1 (
-    echo ERROR: wipe failed.
-    call :fail_pause
-    exit /b 1
+    set "ERR_MSG=[0/8] Wipe failed: docker compose --profile all down -v - see docker output above."
+    set "ERR_HINT=A container or volume may be locked: restart Docker Desktop and retry."
+    goto fail
   )
   echo   Stack removed. Starting from a clean slate.
   echo.
@@ -100,11 +128,11 @@ if "%SKIP_HOSTS%"=="1" (
   echo [1/8] Running hosts-setup.ps1 ...
   powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0hosts-setup.ps1"
   if errorlevel 1 (
-    echo.
-    echo ERROR: hosts-setup.ps1 failed. Re-run this .bat from an elevated prompt,
-    echo        or pass --skip-hosts if the hosts file and LOCAL_HOSTNAME are already set.
-    call :fail_pause
-    exit /b 1
+    set "ERR_MSG=[1/8] hosts-setup.ps1 failed - see its output above."
+    set "ERR_HINT=Pass --skip-hosts if the hosts file and LOCAL_HOSTNAME in .env are already set."
+    net session >nul 2>&1
+    if errorlevel 1 set "ERR_HINT2=This console is NOT elevated: re-run from PowerShell opened 'As Administrator'."
+    goto fail
   )
 )
 
@@ -112,21 +140,26 @@ rem ---------- 2. core ----------
 echo [2/8] Starting core containers mssql rabbit redis mailpit ...
 docker compose up -d
 if errorlevel 1 (
-  echo ERROR: docker compose up -d failed.
-  call :fail_pause
-  exit /b 1
+  set "ERR_MSG=[2/8] docker compose up -d failed - the docker error is printed above."
+  set "ERR_HINT=Common causes: a port already in use, e.g. a local SQL Server on 1433 - or an image pull failure, check network/VPN."
+  goto fail
 )
 
 echo Waiting for mssql and rabbit to become healthy ...
 call :wait_healthy mssql 180
 if errorlevel 1 (
-  call :fail_pause
-  exit /b 1
+  set "ERR_LOGS=mssql"
+  set "ERR_HINT=Check the mssql log above. 'Password validation failed' = MSSQL_SA_PASSWORD too weak."
+  set "ERR_HINT2=If the volume was created earlier with a different password, the sa login fails - wipe it."
+  set "ERR_WIPE=1"
+  goto fail
 )
 call :wait_healthy rabbit 120
 if errorlevel 1 (
-  call :fail_pause
-  exit /b 1
+  set "ERR_LOGS=rabbit"
+  set "ERR_HINT=Check the rabbit log above, e.g. a broken rabbitmq\rabbitmq.conf or ports 5672/15672 in use."
+  set "ERR_WIPE=1"
+  goto fail
 )
 
 rem ---------- 3-4. SQL login / restore / overrides ----------
@@ -136,18 +169,18 @@ if "%SKIP_RESTORE%"=="1" (
   echo [3/8] Creating application logins 00-login-and-databases.sql ...
   docker exec -i mssql %SQLCMD% -S localhost -U sa -P "%MSSQL_SA_PASSWORD%" -C -i /init/00-login-and-databases.sql
   if errorlevel 1 (
-    echo ERROR: 00-login-and-databases.sql failed.
-    call :fail_pause
-    exit /b 1
+    set "ERR_MSG=[3/8] sql/init/00-login-and-databases.sql failed - the sqlcmd error is printed above."
+    set "ERR_HINT=Login failed for user 'sa' = the mssql volume has a different password than .env.local."
+    set "ERR_WIPE=1"
+    goto fail
   )
 
   dir /b "%~dp0sql\backup\*.bak" >nul 2>&1
   if errorlevel 1 (
-    echo.
-    echo ERROR: No .bak files found in sql\backup\.
-    echo Place the group backups there first, then re-run without --skip-restore.
-    call :fail_pause
-    exit /b 1
+    set "ERR_MSG=[4/8] No .bak files in %~dp0sql\backup\"
+    set "ERR_HINT=Copy the group backups there with their original TEST4 names, e.g. test4_power_supportcentre.bak."
+    set "ERR_HINT2=Or pass --skip-restore if the databases are already restored."
+    goto fail
   )
 
   echo [4/8] Restoring backups from sql\backup ...
@@ -160,17 +193,19 @@ if "%SKIP_RESTORE%"=="1" (
     "  ForEach-Object { $_ -replace 'DECLARE @WhatIf\s+BIT = 1','DECLARE @WhatIf    BIT = 0' } |" ^
     "  docker exec -i mssql %SQLCMD% -S localhost -U sa -P '%MSSQL_SA_PASSWORD%' -C"
   if errorlevel 1 (
-    echo ERROR: restore failed.
-    call :fail_pause
-    exit /b 1
+    set "ERR_MSG=[4/8] Restore failed: sql/test4/02-restore-local.sql - the sqlcmd error is printed above."
+    set "ERR_HINT=Check the .bak names match the original TEST4 names and Docker Desktop has enough disk space."
+    set "ERR_LOGS=mssql"
+    set "ERR_WIPE=1"
+    goto fail
   )
 
   echo Applying 20-docker-overrides.sql against [%SUPPORT_CENTRE%] ...
   docker exec -i mssql %SQLCMD% -S localhost -U sa -P "%MSSQL_SA_PASSWORD%" -C -d "%SUPPORT_CENTRE%" -i /init/20-docker-overrides.sql
   if errorlevel 1 (
-    echo ERROR: 20-docker-overrides.sql failed. Is [%SUPPORT_CENTRE%] restored?
-    call :fail_pause
-    exit /b 1
+    set "ERR_MSG=[4/8] sql/init/20-docker-overrides.sql failed against [%SUPPORT_CENTRE%]."
+    set "ERR_HINT=Was [%SUPPORT_CENTRE%] restored? Its name comes from INFRA_DB_PREFIX in .env - it must match the .bak names."
+    goto fail
   )
 )
 
@@ -181,9 +216,10 @@ if "%SKIP_BUILD%"=="1" (
   echo [5/8] Building noodles-build and config-api VPN / NuGet required ...
   docker compose build noodles-build config-api
   if errorlevel 1 (
-    echo ERROR: build failed. Check VPN and access to the internal NuGet feed.
-    call :fail_pause
-    exit /b 1
+    set "ERR_MSG=[5/8] Image build failed: noodles-build / config-api - the build error is printed above."
+    set "ERR_HINT='Unable to load the service index' / 401 / timeout = VPN is off or no access to build.euroffice.co.uk NuGet."
+    set "ERR_HINT2=Compile errors = the sibling repos noodles / api.configuration are on a broken branch."
+    goto fail
   )
 )
 
@@ -194,15 +230,16 @@ if "%SKIP_NOODLES%"=="1" (
   echo [6/8] Starting config-api and noodles ...
   docker compose --profile noodles up -d
   if errorlevel 1 (
-    echo ERROR: noodles profile failed to start.
-    call :fail_pause
-    exit /b 1
+    set "ERR_MSG=[6/8] docker compose --profile noodles up -d failed - the docker error is printed above."
+    set "ERR_HINT=If an image is missing, re-run without --skip-build."
+    goto fail
   )
 
   echo Waiting for config-api on http://localhost:8080 ...
   call :wait_http "http://localhost:8080/Configuration/1/Configuration/service=api.configuration" 180
   if errorlevel 1 (
-    echo WARNING: config-api did not answer in time. Check: docker logs config-api
+    call :show_logs config-api
+    powershell -NoProfile -Command "Write-Host 'WARNING: config-api did not answer in time - see the reason and log above. Continuing.' -ForegroundColor Yellow"
   )
 )
 
@@ -210,19 +247,20 @@ if "%DO_APIS%"=="1" (
   echo Cloning / building satellite APIs ...
   powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0clone-apis.ps1"
   if errorlevel 1 (
-    echo ERROR: clone-apis.ps1 failed.
-    call :fail_pause
-    exit /b 1
+    set "ERR_MSG=clone-apis.ps1 failed - see its output above."
+    set "ERR_HINT=Check git access to the API repos and VPN."
+    goto fail
   )
   docker compose --profile apis build
   if errorlevel 1 (
-    call :fail_pause
-    exit /b 1
+    set "ERR_MSG=docker compose --profile apis build failed - the build error is printed above."
+    set "ERR_HINT=Check VPN / NuGet access and that the cloned API repos build."
+    goto fail
   )
   docker compose --profile apis up -d
   if errorlevel 1 (
-    call :fail_pause
-    exit /b 1
+    set "ERR_MSG=docker compose --profile apis up -d failed - the docker error is printed above."
+    goto fail
   )
 )
 
@@ -233,13 +271,13 @@ if "%SKIP_NOODLES%"=="1" (
   echo [7/8] Running reset-scheduled-tasks.ps1 anyway safe / idempotent ...
   powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0reset-scheduled-tasks.ps1"
   if errorlevel 1 (
-    echo WARNING: reset-scheduled-tasks.ps1 failed.
+    echo WARNING: reset-scheduled-tasks.ps1 failed - see its output above. Re-run later: ops-local.bat reset-tasks
   )
 ) else (
   echo [7/8] Resetting scheduled-task registrations ...
   powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0reset-scheduled-tasks.ps1"
   if errorlevel 1 (
-    echo WARNING: reset-scheduled-tasks.ps1 failed.
+    echo WARNING: reset-scheduled-tasks.ps1 failed - see its output above. Re-run later: ops-local.bat reset-tasks
   )
 )
 
@@ -248,9 +286,9 @@ echo [8/8] Power sites
 if "%DO_POWER%"=="1" (
   powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0power-local-setup.ps1"
   if errorlevel 1 (
-    echo ERROR: power-local-setup.ps1 failed. Run WebConfigPicker first, then re-run with --power from an elevated prompt.
-    call :fail_pause
-    exit /b 1
+    set "ERR_MSG=[8/8] power-local-setup.ps1 failed - see its output above."
+    set "ERR_HINT=Run WebConfigPicker first, then re-run with --power from an elevated prompt."
+    goto fail
   )
 ) else (
   echo   Manual next steps:
@@ -275,11 +313,47 @@ rem ======================================================================
 rem  Helpers
 rem ======================================================================
 
-:fail_pause
+:fail
+rem Prints the concrete cause and how to fix it, then stops the script.
+rem Set before 'goto fail':
+rem   ERR_MSG    what went wrong (required)
+rem   ERR_HINT   how to fix it; ERR_HINT2 an optional second line
+rem   ERR_LOGS   space-separated container names whose recent logs to show
+rem   ERR_WIPE=1 the retry needs --wipe; otherwise a plain re-run is suggested
+rem Values are printed via PowerShell from the environment, so they may contain
+rem any characters; keep & | < > out of them only because of 'set' parsing.
+if not defined ERR_LOGS goto fail_report
+for %%C in (%ERR_LOGS%) do call :show_logs %%C
+:fail_report
 echo.
-powershell -NoProfile -Command "Write-Host 'Setup failed. Wipe to zero and retry with:' -ForegroundColor Red; Write-Host '  setup-local.bat --wipe' -ForegroundColor Yellow"
+powershell -NoProfile -Command ^
+  "Write-Host ('ERROR: ' + $env:ERR_MSG) -ForegroundColor Red;" ^
+  "if ($env:ERR_HINT)  { Write-Host ('Fix:   ' + $env:ERR_HINT)  -ForegroundColor Yellow };" ^
+  "if ($env:ERR_HINT2) { Write-Host ('       ' + $env:ERR_HINT2) -ForegroundColor Yellow };" ^
+  "if ($env:ERR_WIPE -eq '1') { $r = 'Retry: setup-local.bat --wipe   (deletes local containers, volumes and restored databases)' }" ^
+  "else { $r = ('Retry: setup-local.bat ' + $env:ORIG_ARGS).TrimEnd() };" ^
+  "Write-Host $r -ForegroundColor Yellow"
 echo.
 pause
+exit /b 1
+
+:show_logs
+echo.
+echo ----- %~1: last 40 log lines -----
+docker logs --tail 40 %~1 2>&1
+echo ----- end of %~1 log -----
+exit /b 0
+
+:read_reason
+rem Loads ERR_MSG (line 1) and ERR_HINT (line 2) written by a PowerShell check.
+set "ERR_MSG="
+set "ERR_HINT="
+if not exist "%REASON_FILE%" exit /b 0
+< "%REASON_FILE%" (
+  set /p "ERR_MSG="
+  set /p "ERR_HINT="
+)
+del "%REASON_FILE%" >nul 2>&1
 exit /b 0
 
 :read_env
@@ -293,36 +367,69 @@ for /f "usebackq tokens=1,* delims==" %%A in (`findstr /b /c:"%KEY%=" "%~dp0.env
 )
 exit /b 0
 
+:check_password
+rem Catches the password problems that otherwise surface later as an unhealthy
+rem mssql container or a broken sqlcmd call. Never prints the password itself.
+if exist "%REASON_FILE%" del "%REASON_FILE%" >nul 2>&1
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+  "$p = $env:MSSQL_SA_PASSWORD; $m = $null; $h = $null;" ^
+  "$groups = @(@('[A-Z]','[a-z]','[0-9]','[^A-Za-z0-9]') | Where-Object { $p -cmatch $_ }).Count;" ^
+  "if ($p -ceq 'YourPassword') { $m = 'MSSQL_SA_PASSWORD in .env.local is still the placeholder YourPassword.'; $h = 'Set a real password: 8+ characters using 3 of upper case, lower case, digit, symbol.' }" ^
+  "elseif ($p -ne $p.Trim()) { $m = 'MSSQL_SA_PASSWORD in .env.local has leading/trailing spaces.'; $h = 'Remove the spaces around the value in .env.local.' }" ^
+  "elseif ($p.Contains([string][char]34) -or $p.Contains([string][char]39)) { $m = 'MSSQL_SA_PASSWORD in .env.local contains a quote character, which breaks the sqlcmd calls in this script.'; $h = 'Use a password without double or single quotes.' }" ^
+  "elseif ($p.Length -lt 8 -or $groups -lt 3) { $m = ('MSSQL_SA_PASSWORD in .env.local is too weak ({0} chars, {1} of 4 character groups) - SQL Server will refuse to start.' -f $p.Length, $groups); $h = 'Use 8+ characters with 3 of: upper case, lower case, digit, symbol.' };" ^
+  "if ($m) { Set-Content -LiteralPath $env:REASON_FILE -Value @($m, $h); exit 1 }; exit 0"
+if errorlevel 1 (
+  call :read_reason
+  exit /b 1
+)
+exit /b 0
+
 :wait_healthy
-rem Docker on Windows emits a trailing CR; findstr /x "healthy" never matches.
-rem Poll every 5s and print status so the window does not look frozen.
+rem Polls every 5s and prints status so the window does not look frozen.
+rem Fails fast if the container is missing, exited or crash-looping; on timeout
+rem reports the last healthcheck output. The reason ends up in ERR_MSG.
+if exist "%REASON_FILE%" del "%REASON_FILE%" >nul 2>&1
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "$ErrorActionPreference='Continue';" ^
-  "$name='%~1'; $left=[int]%~2;" ^
+  "$name='%~1'; $total=[int]%~2; $left=$total; $reason=$null; $health='unknown';" ^
   "while ($left -gt 0) {" ^
-  "  $raw = docker inspect -f '{{.State.Health.Status}}' $name 2>$null;" ^
-  "  $status = if ($raw) { $raw.ToString().Trim() } else { 'unknown' };" ^
-  "  Write-Host ('  {0}: {1}  ({2}s left)' -f $name, $status, $left);" ^
-  "  if ($status -eq 'healthy') { Write-Host ('  {0} is healthy' -f $name); exit 0 };" ^
+  "  $raw = docker inspect -f '{{.State.Status}};{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}};{{.State.ExitCode}};{{.RestartCount}}' $name 2>$null;" ^
+  "  if (-not $raw) { $reason = ('Container {0} does not exist - docker compose did not create it.' -f $name); break };" ^
+  "  $state, $health, $code, $restarts = $raw.ToString().Trim().Split(';');" ^
+  "  Write-Host ('  {0}: {1} / {2}  ({3}s left)' -f $name, $state, $health, $left);" ^
+  "  if ($health -eq 'healthy') { Write-Host ('  {0} is healthy' -f $name); exit 0 };" ^
+  "  if ($state -eq 'exited' -or $state -eq 'dead') { $reason = ('Container {0} stopped with exit code {1} instead of becoming healthy.' -f $name, $code); break };" ^
+  "  if ([int]$restarts -ge 2) { $reason = ('Container {0} keeps crashing and restarting ({1} restarts).' -f $name, $restarts); break };" ^
   "  Start-Sleep -Seconds 5; $left -= 5" ^
   "};" ^
-  "Write-Host ('ERROR: timed out waiting for {0} to become healthy.' -f $name);" ^
-  "exit 1"
-exit /b %ERRORLEVEL%
+  "if (-not $reason) {" ^
+  "  $reason = ('{0} did not become healthy within {1}s (last status: {2}).' -f $name, $total, $health);" ^
+  "  $log = docker inspect -f '{{if .State.Health}}{{json .State.Health.Log}}{{end}}' $name 2>$null;" ^
+  "  if ($log) { $last = @($log | ConvertFrom-Json) | Select-Object -Last 1;" ^
+  "    if ($last -and $last.Output) { $out = ($last.Output -replace '\s+', ' ').Trim(); if ($out.Length -gt 300) { $out = $out.Substring(0, 300) + '...' }; $reason += ' Last healthcheck: ' + $out } }" ^
+  "};" ^
+  "Set-Content -LiteralPath $env:REASON_FILE -Value $reason; exit 1"
+if errorlevel 1 (
+  call :read_reason
+  exit /b 1
+)
+exit /b 0
 
 :wait_http
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "$ErrorActionPreference='Continue';" ^
-  "$url='%~1'; $left=[int]%~2;" ^
+  "$url='%~1'; $total=[int]%~2; $left=$total; $last='no response';" ^
   "while ($left -gt 0) {" ^
   "  $ok = $false;" ^
   "  try {" ^
   "    $r = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 5;" ^
   "    if ($r.StatusCode -ge 200 -and $r.StatusCode -lt 500) { $ok = $true }" ^
-  "  } catch { }" ^
+  "  } catch { $last = $_.Exception.Message }" ^
   "  if ($ok) { Write-Host '  config-api responded'; exit 0 };" ^
   "  Write-Host ('  waiting for config-api ... ({0}s left)' -f $left);" ^
   "  Start-Sleep -Seconds 5; $left -= 5" ^
   "};" ^
+  "Write-Host ('  config-api did not answer at {0} within {1}s. Last error: {2}' -f $url, $total, $last) -ForegroundColor Yellow;" ^
   "exit 1"
 exit /b %ERRORLEVEL%

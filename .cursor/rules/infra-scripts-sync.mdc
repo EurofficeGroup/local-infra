@@ -1,0 +1,40 @@
+---
+description: local-infra — every infrastructure change ships together with the script changes it requires
+alwaysApply: true
+---
+
+# Main rule
+
+**Every infrastructure change ships together with the script changes it requires.**
+If you change compose, a Dockerfile, `.env*`, SQL, RabbitMQ config or any name, port or path,
+fix, add or delete the affected scripts in the same change, so that every script keeps working.
+
+Scripts: `setup-local.bat`, `ops-local.bat`, `cleanup-local.bat`, `hosts-setup.ps1`, `clone-apis.ps1`,
+`reset-scheduled-tasks.ps1`, `power-local-setup.ps1`, `sql/**`, plus `README.md` and `config-samples/*`.
+
+## Hidden dependencies (names hardcoded in several files)
+
+- Containers/services `mssql`, `rabbit`, `noodles-*`, `noodles-build`: `setup-local.bat`, `ops-local.bat`, `reset-scheduled-tasks.ps1`
+- Profiles `all`, `noodles`, `apis`: `setup-local.bat` (`--wipe`), `ops-local.bat`
+- `/init/` mount path and SQL file names: `setup-local.bat`, `ops-local.bat`
+- `MSSQL_SA_PASSWORD`, `INFRA_*`, `LOCAL_HOSTNAME`: `.env`, `.env.local.example`, `.bat`, `hosts-setup.ps1`, SQL
+- `COMPOSE_ENV_FILES=.env,.env.local`: identical in `setup-local.bat` and `ops-local.bat`
+- Ports and hostnames (config-api `:8080`): `setup-local.bat`, `power-local-setup.ps1`, `config-samples/*`, `20-docker-overrides.sql`
+
+This list is not exhaustive. Always grep, including the sibling repos (`noodles`, `api.configuration`, `power`, `webconfigpicker`, `database`).
+
+## Steps
+
+1. Find all usages. If you cannot list every consumer, say so.
+2. Prefer additive changes (a new variable or flag whose default keeps today's behaviour).
+3. New step: wire it into `setup-local.bat` in the right order. Deleted script: remove its calls and its README row. Scripts stay idempotent.
+4. Update `README.md` and `config-samples/*`.
+5. Validate with `docker compose config` (also `--profile all`), a `.ps1` parse check, and a read-through of `.bat` control flow. Say what you could not verify.
+6. Report what existing users must do: `--wipe`, an `.env.local` edit, or a re-run of `hosts-setup.ps1`.
+
+## Invariants
+
+- No `EnableDelayedExpansion` in the `.bat` files (the password may contain `!`). All flags of `setup-local.bat` keep working.
+- `cleanup-local.bat` never touches volumes, running containers or other Docker projects.
+- `.env.local` and `.bak` files are never committed. A new secret goes into `.env.local.example`.
+- Local environment only: never test, staging or production servers.
