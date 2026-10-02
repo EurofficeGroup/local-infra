@@ -11,7 +11,7 @@ rem  Usage:
 rem    setup-local.bat
 rem    setup-local.bat --wipe
 rem    setup-local.bat --skip-hosts --skip-build
-rem    setup-local.bat --apis --power
+rem    setup-local.bat --power
 rem
 rem  On failure the script prints the concrete cause, how to fix it, recent
 rem  container logs where relevant, and the right command to retry with.
@@ -25,6 +25,7 @@ set "SKIP_RESTORE=0"
 set "SKIP_BUILD=0"
 set "SKIP_NOODLES=0"
 set "DO_APIS=0"
+set "SKIP_PULL=0"
 set "DO_POWER=0"
 
 rem Error report fields, read by :fail (see Helpers).
@@ -44,9 +45,10 @@ if /i "%~1"=="--skip-restore" set "SKIP_RESTORE=1" & shift & goto parse_args
 if /i "%~1"=="--skip-build"   set "SKIP_BUILD=1"   & shift & goto parse_args
 if /i "%~1"=="--skip-noodles" set "SKIP_NOODLES=1" & shift & goto parse_args
 if /i "%~1"=="--apis"         set "DO_APIS=1"      & shift & goto parse_args
+if /i "%~1"=="--skip-pull"    set "SKIP_PULL=1"    & shift & goto parse_args
 if /i "%~1"=="--power"        set "DO_POWER=1"     & shift & goto parse_args
 set "ERR_MSG=Unknown argument: %~1"
-set "ERR_HINT=Usage: setup-local.bat [--wipe] [--skip-hosts] [--skip-restore] [--skip-build] [--skip-noodles] [--apis] [--power]"
+set "ERR_HINT=Usage: setup-local.bat [--wipe] [--skip-hosts] [--skip-restore] [--skip-build] [--skip-noodles] [--skip-pull] [--apis] [--power]"
 set "ORIG_ARGS="
 goto fail
 :args_done
@@ -62,8 +64,18 @@ if not exist "%~dp0.env.local" (
 rem Compose interpolates ${MSSQL_SA_PASSWORD} from .env.local (not from .env).
 set "COMPOSE_ENV_FILES=.env,.env.local"
 
+rem Three compose projects = three groups in Docker Desktop:
+rem   power      docker-compose.yml          mssql rabbit redis mailpit (+ search)
+rem   api-power  docker-compose.api.yml      config-api + satellite APIs
+rem   noodles    docker-compose.noodles.yml  noodles-*
+set "DC_POWER=docker compose -f docker-compose.yml"
+set "DC_API=docker compose -f docker-compose.api.yml"
+set "DC_NOODLES=docker compose -f docker-compose.noodles.yml"
+
 call :read_env MSSQL_SA_PASSWORD
 call :read_env INFRA_DB_PREFIX
+call :read_env INFRA_BACKUP_PREFIX
+call :read_env INFRA_DEALER_CODE
 if not defined MSSQL_SA_PASSWORD (
   findstr /c:"MSSQL_SA_PASSWORD" "%~dp0.env.local" >nul 2>&1
   if errorlevel 1 (
@@ -79,13 +91,23 @@ if not defined MSSQL_SA_PASSWORD (
 call :check_password
 if errorlevel 1 goto fail
 
-if not defined INFRA_DB_PREFIX set "INFRA_DB_PREFIX=test4_power"
+if not defined INFRA_DB_PREFIX set "INFRA_DB_PREFIX=dev_uk"
+if not defined INFRA_BACKUP_PREFIX set "INFRA_BACKUP_PREFIX=test4_power"
+if not defined INFRA_DEALER_CODE set "INFRA_DEALER_CODE=jst"
+call :check_db_vars
+if errorlevel 1 (
+  set "ERR_MSG=INFRA_DB_PREFIX / INFRA_BACKUP_PREFIX / INFRA_DEALER_CODE in .env contain invalid characters."
+  set "ERR_HINT=Use letters, digits and _ only, e.g. INFRA_DB_PREFIX=dev_uk  INFRA_DEALER_CODE=jst."
+  goto fail
+)
 set "SUPPORT_CENTRE=%INFRA_DB_PREFIX%_supportcentre"
 set "SQLCMD=/opt/mssql-tools18/bin/sqlcmd"
 
 echo.
 echo === local-infra setup ===
 echo Support centre DB: %SUPPORT_CENTRE%
+echo Main dealer DB:    %INFRA_DB_PREFIX%_%INFRA_DEALER_CODE%   from %INFRA_BACKUP_PREFIX%_%INFRA_DEALER_CODE%.bak
+echo Other dealers:     every %INFRA_BACKUP_PREFIX%_*.bak in sql\backup
 echo.
 
 rem ---------- prerequisites ----------
@@ -111,9 +133,11 @@ if errorlevel 1 (
 rem ---------- 0. wipe to zero optional / on every failed retry ----------
 if "%DO_WIPE%"=="1" (
   echo [0/8] Wiping stack and volumes to zero ...
-  docker compose --profile all down -v --remove-orphans
+  %DC_NOODLES% --profile build down -v --remove-orphans
+  %DC_API% down -v --remove-orphans
+  %DC_POWER% --profile search down -v --remove-orphans
   if errorlevel 1 (
-    set "ERR_MSG=[0/8] Wipe failed: docker compose --profile all down -v - see docker output above."
+    set "ERR_MSG=[0/8] Wipe failed: docker compose down -v - see docker output above."
     set "ERR_HINT=A container or volume may be locked: restart Docker Desktop and retry."
     goto fail
   )
@@ -137,10 +161,10 @@ if "%SKIP_HOSTS%"=="1" (
 )
 
 rem ---------- 2. core ----------
-echo [2/8] Starting core containers mssql rabbit redis mailpit ...
-docker compose up -d
+echo [2/8] Starting group power: mssql rabbit redis mailpit ...
+%DC_POWER% up -d
 if errorlevel 1 (
-  set "ERR_MSG=[2/8] docker compose up -d failed - the docker error is printed above."
+  set "ERR_MSG=[2/8] docker compose up -d of docker-compose.yml failed - the docker error is printed above."
   set "ERR_HINT=Common causes: a port already in use, e.g. a local SQL Server on 1433 - or an image pull failure, check network/VPN."
   goto fail
 )
@@ -175,11 +199,17 @@ if "%SKIP_RESTORE%"=="1" (
     goto fail
   )
 
-  dir /b "%~dp0sql\backup\*.bak" >nul 2>&1
+  dir /b "%~dp0sql\backup\%INFRA_BACKUP_PREFIX%_supportcentre*.bak" >nul 2>&1
   if errorlevel 1 (
-    set "ERR_MSG=[4/8] No .bak files in %~dp0sql\backup\"
-    set "ERR_HINT=Copy the group backups there with their original TEST4 names, e.g. test4_power_supportcentre.bak."
+    set "ERR_MSG=[4/8] No %INFRA_BACKUP_PREFIX%_supportcentre.bak in %~dp0sql\backup\"
+    set "ERR_HINT=Copy the group backups there with their original TEST4 names, or fix INFRA_BACKUP_PREFIX in .env."
     set "ERR_HINT2=Or pass --skip-restore if the databases are already restored."
+    goto fail
+  )
+  dir /b "%~dp0sql\backup\%INFRA_BACKUP_PREFIX%_%INFRA_DEALER_CODE%*.bak" >nul 2>&1
+  if errorlevel 1 (
+    set "ERR_MSG=[4/8] No dealer backup %INFRA_BACKUP_PREFIX%_%INFRA_DEALER_CODE%.bak in %~dp0sql\backup\"
+    set "ERR_HINT=Copy that dealer's backup there, or set INFRA_DEALER_CODE in .env to a dealer whose .bak you have."
     goto fail
   )
 
@@ -187,24 +217,27 @@ if "%SKIP_RESTORE%"=="1" (
   echo.
   powershell -NoProfile -Command "Write-Host 'NOTE: Database restore can take a long time (tens of minutes for ~15 GB).' -ForegroundColor Yellow; Write-Host 'The console will look frozen until sqlcmd finishes - that is normal. Just wait.' -ForegroundColor Yellow"
   echo.
-  powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-    "$ErrorActionPreference='Stop';" ^
-    "Get-Content -LiteralPath '%~dp0sql\test4\02-restore-local.sql' |" ^
-    "  ForEach-Object { $_ -replace 'DECLARE @WhatIf\s+BIT = 1','DECLARE @WhatIf    BIT = 0' } |" ^
-    "  docker exec -i mssql %SQLCMD% -S localhost -U sa -P '%MSSQL_SA_PASSWORD%' -C"
+  call :run_sql "%~dp0sql\test4\02-restore-local.sql" "" apply
   if errorlevel 1 (
     set "ERR_MSG=[4/8] Restore failed: sql/test4/02-restore-local.sql - the sqlcmd error is printed above."
-    set "ERR_HINT=Check the .bak names match the original TEST4 names and Docker Desktop has enough disk space."
+    set "ERR_HINT=Check the .bak names match INFRA_BACKUP_PREFIX / INFRA_DEALER_CODE and Docker Desktop has enough disk space."
     set "ERR_LOGS=mssql"
     set "ERR_WIPE=1"
     goto fail
   )
 
+  echo Rewriting test4 database names inside synonyms / views / procedures ...
+  call :run_sql "%~dp0sql\init\30-rename-db-references.sql" ""
+  if errorlevel 1 (
+    set "ERR_MSG=[4/8] sql/init/30-rename-db-references.sql failed - the sqlcmd error is printed above."
+    goto fail
+  )
+
   echo Applying 20-docker-overrides.sql against [%SUPPORT_CENTRE%] ...
-  docker exec -i mssql %SQLCMD% -S localhost -U sa -P "%MSSQL_SA_PASSWORD%" -C -d "%SUPPORT_CENTRE%" -i /init/20-docker-overrides.sql
+  call :run_sql "%~dp0sql\init\20-docker-overrides.sql" "%SUPPORT_CENTRE%"
   if errorlevel 1 (
     set "ERR_MSG=[4/8] sql/init/20-docker-overrides.sql failed against [%SUPPORT_CENTRE%]."
-    set "ERR_HINT=Was [%SUPPORT_CENTRE%] restored? Its name comes from INFRA_DB_PREFIX in .env - it must match the .bak names."
+    set "ERR_HINT=Was [%SUPPORT_CENTRE%] restored? Its name is INFRA_DB_PREFIX in .env plus _supportcentre."
     goto fail
   )
 )
@@ -213,56 +246,65 @@ rem ---------- 5. build ----------
 if "%SKIP_BUILD%"=="1" (
   echo [5/8] Skipping image build
 ) else (
-  echo [5/8] Building noodles-build and config-api VPN / NuGet required ...
-  docker compose build noodles-build config-api
+  echo [5/8] Cloning / pulling noodles and API repos, then building VPN / NuGet required ...
+  set "PULL_ARG="
+  if "%SKIP_PULL%"=="1" set "PULL_ARG=-NoPull"
+  call :clone_repos
   if errorlevel 1 (
-    set "ERR_MSG=[5/8] Image build failed: noodles-build / config-api - the build error is printed above."
+    set "ERR_MSG=[5/8] clone-apis.ps1 failed - see its output above."
+    set "ERR_HINT=Check git access to the EurofficeGroup repos on GitHub."
+    goto fail
+  )
+  %DC_NOODLES% build noodles-build
+  if not errorlevel 1 %DC_API% build
+  if errorlevel 1 (
+    set "ERR_MSG=[5/8] Image build failed: noodles-build / config-api / APIs - the build error is printed above."
     set "ERR_HINT='Unable to load the service index' / 401 / timeout = VPN is off or no access to build.euroffice.co.uk NuGet."
-    set "ERR_HINT2=Compile errors = the sibling repos noodles / api.configuration are on a broken branch."
+    set "ERR_HINT2=Compile errors = a sibling repo noodles / api.* is on a broken branch."
     goto fail
   )
 )
 
 rem ---------- 6. noodles / apis ----------
 if "%SKIP_NOODLES%"=="1" (
-  echo [6/8] Skipping config-api / noodles
+  echo [6/8] Skipping config-api / APIs / noodles
 ) else (
-  echo [6/8] Starting config-api and noodles ...
-  docker compose --profile noodles up -d
+  echo [6/8] Starting group api-power: config-api ...
+  %DC_API% up -d config-api
   if errorlevel 1 (
-    set "ERR_MSG=[6/8] docker compose --profile noodles up -d failed - the docker error is printed above."
+    set "ERR_MSG=[6/8] docker compose up -d config-api failed - the docker error is printed above."
     set "ERR_HINT=If an image is missing, re-run without --skip-build."
     goto fail
   )
 
+  rem depends_on cannot cross projects, so wait here before starting noodles.
   echo Waiting for config-api on http://localhost:8080 ...
   call :wait_http "http://localhost:8080/Configuration/1/Configuration/service=api.configuration" 180
   if errorlevel 1 (
     call :show_logs config-api
     powershell -NoProfile -Command "Write-Host 'WARNING: config-api did not answer in time - see the reason and log above. Continuing.' -ForegroundColor Yellow"
   )
+
+  echo Starting the satellite APIs in group api-power ...
+  %DC_API% up -d
+  if errorlevel 1 (
+    set "ERR_MSG=[6/8] docker compose -f docker-compose.api.yml up -d failed - the docker error is printed above."
+    set "ERR_HINT=If an image is missing, re-run without --skip-build."
+    goto fail
+  )
+
+  echo Starting group noodles ...
+  %DC_NOODLES% up -d
+  if errorlevel 1 (
+    set "ERR_MSG=[6/8] docker compose -f docker-compose.noodles.yml up -d failed - the docker error is printed above."
+    set "ERR_HINT=If an image is missing, re-run without --skip-build."
+    goto fail
+  )
 )
 
-if "%DO_APIS%"=="1" (
-  echo Cloning / building satellite APIs ...
-  powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0clone-apis.ps1"
-  if errorlevel 1 (
-    set "ERR_MSG=clone-apis.ps1 failed - see its output above."
-    set "ERR_HINT=Check git access to the API repos and VPN."
-    goto fail
-  )
-  docker compose --profile apis build
-  if errorlevel 1 (
-    set "ERR_MSG=docker compose --profile apis build failed - the build error is printed above."
-    set "ERR_HINT=Check VPN / NuGet access and that the cloned API repos build."
-    goto fail
-  )
-  docker compose --profile apis up -d
-  if errorlevel 1 (
-    set "ERR_MSG=docker compose --profile apis up -d failed - the docker error is printed above."
-    goto fail
-  )
-)
+rem --apis is still accepted so old command lines keep working; the APIs now
+rem start with every run, like config-api.
+if "%DO_APIS%"=="1" echo Note: --apis is no longer needed - the APIs are always started.
 
 rem ---------- 7. scheduled tasks ----------
 if "%SKIP_NOODLES%"=="1" (
@@ -294,7 +336,7 @@ if "%DO_POWER%"=="1" (
   echo   Manual next steps:
   echo     1. WebConfigPicker - select local Configuration API / Rabbit / Redis
   echo     2. Elevated: .\power-local-setup.ps1
-  echo     3. Confirm Environment=local, DealerGroup matches .env, DealerId is a real dealer idl/jst
+  echo     3. Confirm Environment=local, DealerGroup matches .env, DealerId = INFRA_DEALER_CODE %INFRA_DEALER_CODE%
 )
 
 echo.
@@ -384,6 +426,40 @@ if errorlevel 1 (
   exit /b 1
 )
 exit /b 0
+
+:clone_repos
+rem Outside the if-block on purpose: PULL_ARG is set inside it, and without
+rem delayed expansion a %%PULL_ARG%% in the same block would still be empty.
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0clone-apis.ps1" %PULL_ARG%
+exit /b %ERRORLEVEL%
+
+:run_sql
+rem Pipes a SQL script into sqlcmd in the mssql container, substituting the
+rem database switch from .env into its DECLARE lines first:
+rem   @SourcePrefix <- INFRA_BACKUP_PREFIX   @TargetPrefix <- INFRA_DB_PREFIX
+rem   @DealerCode   <- INFRA_DEALER_CODE     @WhatIf 1 -> 0 when arg 3 is apply
+rem   arg 1 = script path on the host, arg 2 = database ("" = master)
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+  "$ErrorActionPreference='Stop';" ^
+  "$db = '%~2'; $dbArgs = @(); if ($db) { $dbArgs = @('-d', $db) };" ^
+  "$set = { param($line, $name, $value) $line -replace ('^(DECLARE @' + $name + '\s.*?=\s*)N''[^'']*'''), ('${1}N''' + $value + '''') };" ^
+  "Get-Content -LiteralPath '%~1' | ForEach-Object {" ^
+  "  $l = $_;" ^
+  "  if ('%~3' -eq 'apply') { $l = $l -replace 'DECLARE @WhatIf\s+BIT = 1','DECLARE @WhatIf    BIT = 0' };" ^
+  "  $l = & $set $l 'SourcePrefix' $env:INFRA_BACKUP_PREFIX;" ^
+  "  $l = & $set $l 'TargetPrefix' $env:INFRA_DB_PREFIX;" ^
+  "  & $set $l 'DealerCode' $env:INFRA_DEALER_CODE" ^
+  "} | docker exec -i mssql %SQLCMD% -S localhost -U sa -P $env:MSSQL_SA_PASSWORD -C @dbArgs;" ^
+  "exit $LASTEXITCODE"
+exit /b %ERRORLEVEL%
+
+:check_db_vars
+rem The three names end up inside SQL string literals and database names, so
+rem allow only letters, digits and underscores.
+powershell -NoProfile -Command ^
+  "$bad = @('INFRA_DB_PREFIX','INFRA_BACKUP_PREFIX','INFRA_DEALER_CODE') | Where-Object { [Environment]::GetEnvironmentVariable($_) -notmatch '^[A-Za-z0-9_]+$' };" ^
+  "if ($bad) { Write-Host ('ERROR: ' + ($bad -join ', ') + ' in .env must be letters, digits or _ only.') -ForegroundColor Red; exit 1 }; exit 0"
+exit /b %ERRORLEVEL%
 
 :wait_healthy
 rem Polls every 5s and prints status so the window does not look frozen.

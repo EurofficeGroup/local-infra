@@ -5,20 +5,21 @@
 
      docker exec -i mssql /opt/mssql-tools18/bin/sqlcmd \
        -S localhost -U sa -P '<MSSQL_SA_PASSWORD from .env.local>' -C \
-       -d test4_power_supportcentre -i /init/20-docker-overrides.sql
+       -d dev_uk_supportcentre -i /init/20-docker-overrides.sql
 
-   Run it once per group you restore - test4_power_supportcentre today,
-   test4_eo_supportcentre when you add that group.
+   setup-local.bat / ops-local.bat substitute @SourcePrefix and @TargetPrefix
+   below from INFRA_BACKUP_PREFIX / INFRA_DB_PREFIX in .env. Run by hand, edit
+   them here.
 
-   WHAT IT DOES NOT TOUCH: the group prefix and catalog names. Values such as
-     Generic             = ...Initial Catalog=test4_power_{0}
-     SupportCentreSchema = test4_power_supportcentre.dbo
-     DealerSchema        = test4_power_{0}.dbo
-   keep their catalog names. That is what keeps the local instance a mirror of
-   TEST4 rather than a one-off rename. Environment IS overridden below (to
-   'local') - it turns out to feed dealer-routing-key computation for pub/sub,
-   not just database names, so leaving it as 'test4' silently breaks event
-   delivery between endpoints even though everything else works.
+   CATALOG NAMES. 02-restore-local.sql restores test4_power_* as dev_uk_*, so
+   every catalog reference in the configuration is rewritten to match:
+     Generic             = ...Initial Catalog=test4_power_{0}  ->  dev_uk_{0}
+     SupportCentreSchema = test4_power_supportcentre.dbo       ->  dev_uk_supportcentre.dbo
+     DealerSchema        = test4_power_{0}.dbo                 ->  dev_uk_{0}.dbo
+   {0} is the role or the dealer code and is left alone. Environment IS also
+   overridden below (to 'local') - it feeds dealer-routing-key computation for
+   pub/sub, not just database names, so leaving it as 'test4' silently breaks
+   event delivery between endpoints even though everything else works.
 
    Idempotent. Run it again after restoring a newer backup.
    ===================================================================== */
@@ -50,6 +51,12 @@ DECLARE @SmtpPort  NVARCHAR(10)  = N'1025';
 -- row first, which is what that column is for.
 DECLARE @FileRoot  NVARCHAR(200) = N'/files/';
 DECLARE @WhatIf    BIT = 0;   -- 1 = show the before/after, change nothing
+-- Catalog prefix: <SourcePrefix>_ in the restored configuration becomes
+-- <TargetPrefix>_. Equal values = no rename.
+DECLARE @SourcePrefix NVARCHAR(100) = N'test4_power';  -- INFRA_BACKUP_PREFIX
+DECLARE @TargetPrefix NVARCHAR(100) = N'dev_uk';       -- INFRA_DB_PREFIX
+-- LIKE pattern for '<SourcePrefix>_' with the underscores taken literally.
+DECLARE @SourceLike   NVARCHAR(300) = N'%' + REPLACE(@SourcePrefix, N'_', N'[_]') + N'[_]%';
 
 -- ---------------------------------------------------------------------
 -- Sanity: are we in a support centre database on the local container?
@@ -74,7 +81,7 @@ PRINT N'Support centre: ' + DB_NAME();
 -- TEST4 values look like
 --   Data Source=MSSQL-TEST-QA;Failover Partner=MSSQL-TEST-QA;Initial Catalog=test4_power_{0};User Id=EuroWebsite;...
 -- and must become
---   Data Source=localhost,1433;Initial Catalog=test4_power_{0};User Id=EuroWebsite;...;TrustServerCertificate=True
+--   Data Source=localhost,1433;Initial Catalog=dev_uk_{0};User Id=EuroWebsite;...;TrustServerCertificate=True
 --
 -- Rebuilt token by token rather than by blind REPLACE, so an unexpected server
 -- name cannot slip through and the catalog is never altered.
@@ -165,7 +172,31 @@ UPDATE c
  ) AS x
  WHERE c.new_value LIKE N'%[[]secret:%';
 
+-- Catalog prefix inside the connection strings (Initial Catalog=test4_power_{0}).
+IF @SourcePrefix <> @TargetPrefix
+    UPDATE #cs
+       SET new_value = REPLACE(new_value, @SourcePrefix + N'_', @TargetPrefix + N'_')
+     WHERE new_value LIKE @SourceLike;
+
 SELECT cfg_Name, old_value, new_value FROM #cs ORDER BY cfg_Name;
+
+-- ---------------------------------------------------------------------
+-- 1b. Catalog prefix in values that are not connection strings
+--     (SupportCentreSchema, ProductCatalogueSchema, DealerSchema, ...)
+-- ---------------------------------------------------------------------
+IF OBJECT_ID('tempdb..#cat') IS NOT NULL DROP TABLE #cat;
+CREATE TABLE #cat (cfg_Key INT NOT NULL PRIMARY KEY, cfg_Name NVARCHAR(200) COLLATE DATABASE_DEFAULT NOT NULL,
+                   old_value NVARCHAR(MAX) NOT NULL, new_value NVARCHAR(MAX) NOT NULL);
+
+IF @SourcePrefix <> @TargetPrefix
+    INSERT INTO #cat (cfg_Key, cfg_Name, old_value, new_value)
+    SELECT c.cfg_Key, c.cfg_Name, c.cfg_Value,
+           REPLACE(c.cfg_Value, @SourcePrefix + N'_', @TargetPrefix + N'_')
+      FROM dbo.cfg_Configurations c
+     WHERE c.cfg_Value LIKE @SourceLike
+       AND NOT EXISTS (SELECT 1 FROM #cs x WHERE x.cfg_Key = c.cfg_Key);
+
+SELECT cfg_Name, old_value, new_value FROM #cat ORDER BY cfg_Name;
 
 -- ---------------------------------------------------------------------
 -- 2. Flat endpoint values
@@ -294,7 +325,7 @@ SELECT cfg_Name, cfg_Value AS old_value,
 -- ---------------------------------------------------------------------
 IF @WhatIf = 1
 BEGIN
-    RAISERROR (N'@WhatIf was 1: nothing changed. Review the three result sets above, then set @WhatIf = 0.', 10, 1);
+    RAISERROR (N'@WhatIf was 1: nothing changed. Review the four result sets above, then set @WhatIf = 0.', 10, 1);
     RETURN;
 END
 
@@ -307,6 +338,13 @@ UPDATE c
  WHERE x.new_value IS NOT NULL;
 
 PRINT N'Connection strings repointed: ' + CAST(@@ROWCOUNT AS NVARCHAR(10));
+
+UPDATE c
+   SET c.cfg_Value = x.new_value
+  FROM dbo.cfg_Configurations c
+  JOIN #cat x ON x.cfg_Key = c.cfg_Key;
+
+PRINT N'Catalog prefix ' + @SourcePrefix + N'_ -> ' + @TargetPrefix + N'_: ' + CAST(@@ROWCOUNT AS NVARCHAR(10));
 
 UPDATE c
    SET c.cfg_Value = f.value
@@ -341,6 +379,7 @@ SELECT cfg_Name, cfg_Value
     OR cfg_Value LIKE N'%mandrill%'
     OR cfg_Value LIKE N'%10.2.34.%'
     OR cfg_Value LIKE N'\\%'
+    OR (@SourcePrefix <> @TargetPrefix AND cfg_Value LIKE @SourceLike)
  ORDER BY cfg_Name;
 
 PRINT N'Rows above still reference something outside this machine - review them.';

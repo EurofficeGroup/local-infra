@@ -32,15 +32,13 @@ if errorlevel 1 (
   exit /b 1
 )
 
-set "COMPOSE_PROJECT_NAME="
-call :read_env COMPOSE_PROJECT_NAME
-if not defined COMPOSE_PROJECT_NAME set "COMPOSE_PROJECT_NAME=local-infra"
-set "PROJECT_FILTER=label=com.docker.compose.project=%COMPOSE_PROJECT_NAME%"
+rem The stack is three compose projects, one Docker Desktop group each.
+set "PROJECTS=power api-power noodles"
 
 echo.
-echo === local-infra cleanup ^(project: %COMPOSE_PROJECT_NAME%^) ===
+echo === local-infra cleanup ^(projects: %PROJECTS%^) ===
 echo.
-echo Scoped to compose label [%PROJECT_FILTER%].
+echo Scoped to compose labels com.docker.compose.project=[%PROJECTS%].
 echo Other Docker projects, volumes, and running containers are not touched.
 echo.
 echo Before:
@@ -57,30 +55,36 @@ if errorlevel 1 goto fail_core
 echo   mssql, rabbit, redis - running
 echo.
 
-echo [2/4] Pruning BuildKit cache for %COMPOSE_PROJECT_NAME% ...
-docker builder prune -af --filter "%PROJECT_FILTER%"
-if errorlevel 1 (
-  echo ERROR: builder prune failed.
-  call :fail_pause
-  exit /b 1
+echo [2/4] Pruning BuildKit cache ...
+for %%P in (%PROJECTS%) do (
+  docker builder prune -af --filter "label=com.docker.compose.project=%%P"
+  if errorlevel 1 (
+    echo ERROR: builder prune failed for %%P.
+    call :fail_pause
+    exit /b 1
+  )
 )
 echo.
 
-echo [3/4] Removing stopped containers for %COMPOSE_PROJECT_NAME% ...
-docker container prune -f --filter "%PROJECT_FILTER%"
-if errorlevel 1 (
-  echo ERROR: container prune failed.
-  call :fail_pause
-  exit /b 1
+echo [3/4] Removing stopped containers ...
+for %%P in (%PROJECTS%) do (
+  docker container prune -f --filter "label=com.docker.compose.project=%%P"
+  if errorlevel 1 (
+    echo ERROR: container prune failed for %%P.
+    call :fail_pause
+    exit /b 1
+  )
 )
 echo.
 
-echo [4/4] Removing unused images for %COMPOSE_PROJECT_NAME% ...
-docker image prune -af --filter "%PROJECT_FILTER%"
-if errorlevel 1 (
-  echo ERROR: image prune failed.
-  call :fail_pause
-  exit /b 1
+echo [4/4] Removing unused images ...
+for %%P in (%PROJECTS%) do (
+  docker image prune -af --filter "label=com.docker.compose.project=%%P"
+  if errorlevel 1 (
+    echo ERROR: image prune failed for %%P.
+    call :fail_pause
+    exit /b 1
+  )
 )
 echo.
 
@@ -98,7 +102,7 @@ if errorlevel 1 goto fail_core
 echo   mssql, rabbit, redis - still running
 echo.
 
-powershell -NoProfile -Command "Write-Host 'Done. Only %COMPOSE_PROJECT_NAME% unused build data removed.' -ForegroundColor Green"
+powershell -NoProfile -Command "Write-Host 'Done. Only unused build data of %PROJECTS% removed.' -ForegroundColor Green"
 echo.
 pause
 exit /b 0

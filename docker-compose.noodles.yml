@@ -1,0 +1,428 @@
+# ======================================================================
+# EurofficeGroup - local infrastructure, part 3 of 3: group "noodles"
+#
+#   docker compose -f docker-compose.noodles.yml build noodles-build
+#   docker compose -f docker-compose.noodles.yml up -d                  # all sixteen
+#   docker compose -f docker-compose.noodles.yml up -d noodles-sales    # one
+#
+# Needs "power" (mssql, rabbit) and config-api from "api-power" running.
+# depends_on cannot cross projects; until config-api answers, a service
+# exits and restart: unless-stopped brings it back.
+# ======================================================================
+
+name: noodles
+
+networks:
+  hostnet:
+    name: hostnet
+    external: true    # created by docker-compose.yml (project power)
+
+services:
+
+  # ==================================================================
+  # Noodles services. With N = -f docker-compose.noodles.yml:
+  #
+  #   docker compose N up -d noodles-sales                one service
+  #   docker compose N up -d noodles-sales noodles-email  a few
+  #   docker compose N up -d                              all of them
+  #   docker compose N stop noodles-sales                 stop just that one
+  #   docker compose N logs -f noodles-sales              follow just that one
+  #   (docker stop/logs noodles-sales work too - container names are global)
+  #
+  # All sixteen share one image; see docker/noodles.Dockerfile for why.
+  # Build it once:   docker compose N build noodles-build
+  #
+  # Running all sixteen needs roughly 8 GB. Start what you need.
+  #
+  # DEBUGGING: stop the container for the service you are working on and run
+  # that one project from Rider. It reaches the same containers by the same
+  # hostnames, because hosts-setup.ps1 points mssql/rabbit/redis/mailpit/
+  # config-api at 127.0.0.1 on this machine.
+  # ==================================================================
+
+  # ------------------------------------------------------------------
+  # Builds infra/noodles:local. Never started - it exists so that one service
+  # owns the build instead of all sixteen declaring the same one, which made
+  # a cold `up` fan out into sixteen identical builds.
+  #
+  #   docker compose -f docker-compose.noodles.yml build noodles-build
+  #
+  # Rebuild after changing Noodles source; `up` alone will not rebuild an
+  # image that already exists.
+  # ------------------------------------------------------------------
+  noodles-build:
+    profiles: ["build"]
+    image: ${NOODLES_IMAGE}
+    build:
+      context: ../noodles
+      dockerfile: ../local-infra/docker/noodles.Dockerfile
+    entrypoint: ["true"]
+    networks: [hostnet]
+
+
+  noodles-actions:
+    container_name: noodles-actions
+    hostname: ${LOCAL_HOSTNAME}
+    image: ${NOODLES_IMAGE}
+    restart: unless-stopped
+    environment:
+      NOODLES_SERVICE: Noodles.Actions
+      ServiceName: noodles.actions
+      DealerGroup: ${INFRA_DEALER_GROUP}
+      Environment: ${INFRA_ENVIRONMENT}
+      ConfigurationUrl: ${CONFIGURATION_URL}
+    volumes:
+      # The shared file locations from the configuration. In the real estate
+      # these are Azure Files shares on \steostoragetestuks01...; here one
+      # host folder stands in for all of them, and the configuration points at
+      # /files (see sql/init/20-docker-overrides.sql).
+      - ./files:/files
+    networks: [hostnet]
+    mem_limit: ${NOODLES_MEM}
+    mem_reservation: ${NOODLES_MEM_RES}
+    cpus: ${NOODLES_CPUS}
+
+
+  noodles-ai:
+    container_name: noodles-ai
+    hostname: ${LOCAL_HOSTNAME}
+    image: ${NOODLES_IMAGE}
+    restart: unless-stopped
+    environment:
+      NOODLES_SERVICE: Noodles.Ai
+      ServiceName: noodles.ai
+      DealerGroup: ${INFRA_DEALER_GROUP}
+      Environment: ${INFRA_ENVIRONMENT}
+      ConfigurationUrl: ${CONFIGURATION_URL}
+    volumes:
+      # The shared file locations from the configuration. In the real estate
+      # these are Azure Files shares on \steostoragetestuks01...; here one
+      # host folder stands in for all of them, and the configuration points at
+      # /files (see sql/init/20-docker-overrides.sql).
+      - ./files:/files
+    networks: [hostnet]
+    mem_limit: ${NOODLES_MEM}
+    mem_reservation: ${NOODLES_MEM_RES}
+    cpus: ${NOODLES_CPUS}
+
+
+  noodles-audience:
+    container_name: noodles-audience
+    hostname: ${LOCAL_HOSTNAME}
+    image: ${NOODLES_IMAGE}
+    restart: unless-stopped
+    environment:
+      NOODLES_SERVICE: Noodles.Audience
+      ServiceName: noodles.audience
+      DealerGroup: ${INFRA_DEALER_GROUP}
+      Environment: ${INFRA_ENVIRONMENT}
+      ConfigurationUrl: ${CONFIGURATION_URL}
+    volumes:
+      # The shared file locations from the configuration. In the real estate
+      # these are Azure Files shares on \steostoragetestuks01...; here one
+      # host folder stands in for all of them, and the configuration points at
+      # /files (see sql/init/20-docker-overrides.sql).
+      - ./files:/files
+    networks: [hostnet]
+    mem_limit: ${NOODLES_MEM}
+    mem_reservation: ${NOODLES_MEM_RES}
+    cpus: ${NOODLES_CPUS}
+
+
+  noodles-catalogues:
+    container_name: noodles-catalogues
+    hostname: ${LOCAL_HOSTNAME}
+    image: ${NOODLES_IMAGE}
+    restart: unless-stopped
+    environment:
+      NOODLES_SERVICE: Noodles.Catalogues
+      ServiceName: noodles.catalogues
+      DealerGroup: ${INFRA_DEALER_GROUP}
+      Environment: ${INFRA_ENVIRONMENT}
+      ConfigurationUrl: ${CONFIGURATION_URL}
+    volumes:
+      # The shared file locations from the configuration. In the real estate
+      # these are Azure Files shares on \steostoragetestuks01...; here one
+      # host folder stands in for all of them, and the configuration points at
+      # /files (see sql/init/20-docker-overrides.sql).
+      - ./files:/files
+    networks: [hostnet]
+    mem_limit: ${NOODLES_MEM}
+    mem_reservation: ${NOODLES_MEM_RES}
+    cpus: ${NOODLES_CPUS}
+
+
+  noodles-email:
+    container_name: noodles-email
+    hostname: ${LOCAL_HOSTNAME}
+    image: ${NOODLES_IMAGE}
+    restart: unless-stopped
+    environment:
+      NOODLES_SERVICE: Noodles.Email
+      ServiceName: noodles.email
+      DealerGroup: ${INFRA_DEALER_GROUP}
+      Environment: ${INFRA_ENVIRONMENT}
+      ConfigurationUrl: ${CONFIGURATION_URL}
+    volumes:
+      # The shared file locations from the configuration. In the real estate
+      # these are Azure Files shares on \steostoragetestuks01...; here one
+      # host folder stands in for all of them, and the configuration points at
+      # /files (see sql/init/20-docker-overrides.sql).
+      - ./files:/files
+    networks: [hostnet]
+    mem_limit: ${NOODLES_MEM}
+    mem_reservation: ${NOODLES_MEM_RES}
+    cpus: ${NOODLES_CPUS}
+
+
+  noodles-finance:
+    container_name: noodles-finance
+    hostname: ${LOCAL_HOSTNAME}
+    image: ${NOODLES_IMAGE}
+    restart: unless-stopped
+    environment:
+      NOODLES_SERVICE: Noodles.Finance
+      ServiceName: noodles.finance
+      DealerGroup: ${INFRA_DEALER_GROUP}
+      Environment: ${INFRA_ENVIRONMENT}
+      ConfigurationUrl: ${CONFIGURATION_URL}
+    volumes:
+      # The shared file locations from the configuration. In the real estate
+      # these are Azure Files shares on \steostoragetestuks01...; here one
+      # host folder stands in for all of them, and the configuration points at
+      # /files (see sql/init/20-docker-overrides.sql).
+      - ./files:/files
+    networks: [hostnet]
+    mem_limit: ${NOODLES_MEM}
+    mem_reservation: ${NOODLES_MEM_RES}
+    cpus: ${NOODLES_CPUS}
+
+
+  noodles-inventory:
+    container_name: noodles-inventory
+    hostname: ${LOCAL_HOSTNAME}
+    image: ${NOODLES_IMAGE}
+    restart: unless-stopped
+    environment:
+      NOODLES_SERVICE: Noodles.Inventory
+      ServiceName: noodles.inventory
+      DealerGroup: ${INFRA_DEALER_GROUP}
+      Environment: ${INFRA_ENVIRONMENT}
+      ConfigurationUrl: ${CONFIGURATION_URL}
+    volumes:
+      # The shared file locations from the configuration. In the real estate
+      # these are Azure Files shares on \steostoragetestuks01...; here one
+      # host folder stands in for all of them, and the configuration points at
+      # /files (see sql/init/20-docker-overrides.sql).
+      - ./files:/files
+    networks: [hostnet]
+    mem_limit: ${NOODLES_MEM}
+    mem_reservation: ${NOODLES_MEM_RES}
+    cpus: ${NOODLES_CPUS}
+
+
+  noodles-marketing:
+    container_name: noodles-marketing
+    hostname: ${LOCAL_HOSTNAME}
+    image: ${NOODLES_IMAGE}
+    restart: unless-stopped
+    environment:
+      NOODLES_SERVICE: Noodles.Marketing
+      ServiceName: noodles.marketing
+      DealerGroup: ${INFRA_DEALER_GROUP}
+      Environment: ${INFRA_ENVIRONMENT}
+      ConfigurationUrl: ${CONFIGURATION_URL}
+    volumes:
+      # The shared file locations from the configuration. In the real estate
+      # these are Azure Files shares on \steostoragetestuks01...; here one
+      # host folder stands in for all of them, and the configuration points at
+      # /files (see sql/init/20-docker-overrides.sql).
+      - ./files:/files
+    networks: [hostnet]
+    mem_limit: ${NOODLES_MEM}
+    mem_reservation: ${NOODLES_MEM_RES}
+    cpus: ${NOODLES_CPUS}
+
+
+  noodles-pdf:
+    container_name: noodles-pdf
+    hostname: ${LOCAL_HOSTNAME}
+    image: ${NOODLES_IMAGE}
+    restart: unless-stopped
+    environment:
+      NOODLES_SERVICE: Noodles.Pdf
+      ServiceName: noodles.pdf
+      DealerGroup: ${INFRA_DEALER_GROUP}
+      Environment: ${INFRA_ENVIRONMENT}
+      ConfigurationUrl: ${CONFIGURATION_URL}
+    volumes:
+      # The shared file locations from the configuration. In the real estate
+      # these are Azure Files shares on \steostoragetestuks01...; here one
+      # host folder stands in for all of them, and the configuration points at
+      # /files (see sql/init/20-docker-overrides.sql).
+      - ./files:/files
+    networks: [hostnet]
+    mem_limit: ${NOODLES_MEM}
+    mem_reservation: ${NOODLES_MEM_RES}
+    cpus: ${NOODLES_CPUS}
+
+
+  noodles-reporting:
+    container_name: noodles-reporting
+    hostname: ${LOCAL_HOSTNAME}
+    image: ${NOODLES_IMAGE}
+    restart: unless-stopped
+    environment:
+      NOODLES_SERVICE: Noodles.Reporting
+      ServiceName: noodles.reporting
+      DealerGroup: ${INFRA_DEALER_GROUP}
+      Environment: ${INFRA_ENVIRONMENT}
+      ConfigurationUrl: ${CONFIGURATION_URL}
+    volumes:
+      # The shared file locations from the configuration. In the real estate
+      # these are Azure Files shares on \steostoragetestuks01...; here one
+      # host folder stands in for all of them, and the configuration points at
+      # /files (see sql/init/20-docker-overrides.sql).
+      - ./files:/files
+    networks: [hostnet]
+    mem_limit: ${NOODLES_MEM}
+    mem_reservation: ${NOODLES_MEM_RES}
+    cpus: ${NOODLES_CPUS}
+
+
+  noodles-sales:
+    container_name: noodles-sales
+    hostname: ${LOCAL_HOSTNAME}
+    image: ${NOODLES_IMAGE}
+    restart: unless-stopped
+    environment:
+      NOODLES_SERVICE: Noodles.Sales
+      ServiceName: noodles.sales
+      DealerGroup: ${INFRA_DEALER_GROUP}
+      Environment: ${INFRA_ENVIRONMENT}
+      ConfigurationUrl: ${CONFIGURATION_URL}
+    volumes:
+      # The shared file locations from the configuration. In the real estate
+      # these are Azure Files shares on \steostoragetestuks01...; here one
+      # host folder stands in for all of them, and the configuration points at
+      # /files (see sql/init/20-docker-overrides.sql).
+      - ./files:/files
+    networks: [hostnet]
+    mem_limit: ${NOODLES_MEM}
+    mem_reservation: ${NOODLES_MEM_RES}
+    cpus: ${NOODLES_CPUS}
+
+
+  noodles-schedulecoordinator:
+    container_name: noodles-schedulecoordinator
+    hostname: ${LOCAL_HOSTNAME}
+    image: ${NOODLES_IMAGE}
+    restart: unless-stopped
+    environment:
+      NOODLES_SERVICE: Noodles.ScheduleCoordinator
+      ServiceName: noodles.schedulecoordinator
+      DealerGroup: ${INFRA_DEALER_GROUP}
+      Environment: ${INFRA_ENVIRONMENT}
+      ConfigurationUrl: ${CONFIGURATION_URL}
+    volumes:
+      # The shared file locations from the configuration. In the real estate
+      # these are Azure Files shares on \steostoragetestuks01...; here one
+      # host folder stands in for all of them, and the configuration points at
+      # /files (see sql/init/20-docker-overrides.sql).
+      - ./files:/files
+    networks: [hostnet]
+    mem_limit: ${NOODLES_MEM}
+    mem_reservation: ${NOODLES_MEM_RES}
+    cpus: ${NOODLES_CPUS}
+
+
+  noodles-segmentation:
+    container_name: noodles-segmentation
+    hostname: ${LOCAL_HOSTNAME}
+    image: ${NOODLES_IMAGE}
+    restart: unless-stopped
+    environment:
+      NOODLES_SERVICE: Noodles.Segmentation
+      ServiceName: noodles.segmentation
+      DealerGroup: ${INFRA_DEALER_GROUP}
+      Environment: ${INFRA_ENVIRONMENT}
+      ConfigurationUrl: ${CONFIGURATION_URL}
+    volumes:
+      # The shared file locations from the configuration. In the real estate
+      # these are Azure Files shares on \steostoragetestuks01...; here one
+      # host folder stands in for all of them, and the configuration points at
+      # /files (see sql/init/20-docker-overrides.sql).
+      - ./files:/files
+    networks: [hostnet]
+    mem_limit: ${NOODLES_MEM}
+    mem_reservation: ${NOODLES_MEM_RES}
+    cpus: ${NOODLES_CPUS}
+
+
+  noodles-statistics:
+    container_name: noodles-statistics
+    hostname: ${LOCAL_HOSTNAME}
+    image: ${NOODLES_IMAGE}
+    restart: unless-stopped
+    environment:
+      NOODLES_SERVICE: Noodles.Statistics
+      ServiceName: noodles.statistics
+      DealerGroup: ${INFRA_DEALER_GROUP}
+      Environment: ${INFRA_ENVIRONMENT}
+      ConfigurationUrl: ${CONFIGURATION_URL}
+    volumes:
+      # The shared file locations from the configuration. In the real estate
+      # these are Azure Files shares on \steostoragetestuks01...; here one
+      # host folder stands in for all of them, and the configuration points at
+      # /files (see sql/init/20-docker-overrides.sql).
+      - ./files:/files
+    networks: [hostnet]
+    mem_limit: ${NOODLES_MEM}
+    mem_reservation: ${NOODLES_MEM_RES}
+    cpus: ${NOODLES_CPUS}
+
+
+  noodles-transport:
+    container_name: noodles-transport
+    hostname: ${LOCAL_HOSTNAME}
+    image: ${NOODLES_IMAGE}
+    restart: unless-stopped
+    environment:
+      NOODLES_SERVICE: Noodles.Transport
+      ServiceName: noodles.transport
+      DealerGroup: ${INFRA_DEALER_GROUP}
+      Environment: ${INFRA_ENVIRONMENT}
+      ConfigurationUrl: ${CONFIGURATION_URL}
+    volumes:
+      # The shared file locations from the configuration. In the real estate
+      # these are Azure Files shares on \steostoragetestuks01...; here one
+      # host folder stands in for all of them, and the configuration points at
+      # /files (see sql/init/20-docker-overrides.sql).
+      - ./files:/files
+    networks: [hostnet]
+    mem_limit: ${NOODLES_MEM}
+    mem_reservation: ${NOODLES_MEM_RES}
+    cpus: ${NOODLES_CPUS}
+
+
+  noodles-uploaders:
+    container_name: noodles-uploaders
+    hostname: ${LOCAL_HOSTNAME}
+    image: ${NOODLES_IMAGE}
+    restart: unless-stopped
+    environment:
+      NOODLES_SERVICE: Noodles.Uploaders
+      ServiceName: noodles.uploaders
+      DealerGroup: ${INFRA_DEALER_GROUP}
+      Environment: ${INFRA_ENVIRONMENT}
+      ConfigurationUrl: ${CONFIGURATION_URL}
+    volumes:
+      # The shared file locations from the configuration. In the real estate
+      # these are Azure Files shares on \steostoragetestuks01...; here one
+      # host folder stands in for all of them, and the configuration points at
+      # /files (see sql/init/20-docker-overrides.sql).
+      - ./files:/files
+    networks: [hostnet]
+    mem_limit: ${NOODLES_MEM}
+    mem_reservation: ${NOODLES_MEM_RES}
+    cpus: ${NOODLES_CPUS}

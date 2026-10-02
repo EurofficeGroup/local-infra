@@ -17,11 +17,10 @@
 <appSettings>
   <!== LOCAL ==> A dealer from the 'pow' group, not eo0.
        The committed value is eo0/eog because the repo ships the test6 config.
-       The databases restored from TEST4 keep their own names, so the power
-       group's dealers are test4_power_idl and test4_power_jst. Switch group by
-       changing DealerGroup here and the Generic prefix in the Configuration
-       API's appsettings.json - see sql/test4/README.md. -->
-  <add key="DealerId" value="idl" />
+       INFRA_DEALER_CODE from local-infra/.env (default jst) - the main
+       dealer (dev_uk_jst); dev_uk_idl is restored as well. Switch group by changing
+       DealerGroup here and the group switch in .env - see sql/test4/README.md. -->
+  <add key="DealerId" value="jst" />
 
   <!== LOCAL ==> Configuration API runs locally, not on vm-test-uks-06 -->
   <add key="ConfigurationUrl" value="http://localhost:8080/Configuration" />

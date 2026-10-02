@@ -15,7 +15,7 @@
       1. Finds every database on the local mssql container that has a
          column named sta_OriginatingEndpoint (i.e. holds
          dbo.sta_ScheduledTasks - this lives in the group's support
-         centre database, e.g. test4_power_supportcentre).
+         centre database, e.g. dev_uk_supportcentre).
       2. Empties dbo.sts_ScheduledTaskSchedules and dbo.sta_ScheduledTasks
          in each one found (safe - every Noodles service re-registers all
          of its scheduled tasks on startup, repopulating these tables
@@ -115,6 +115,11 @@ PRINT N'  sta_ScheduledTasks rows removed: ' + CAST(@taskCount AS NVARCHAR(10));
 }
 
 Write-Host 'Recreating noodles-* containers so they re-register with their current address ...'
-docker compose --profile noodles up -d --force-recreate
+# Only the noodles-* services (their own project, docker-compose.noodles.yml),
+# so mssql/rabbit/redis/mailpit/config-api are never recreated here.
+$noodles = docker compose -f docker-compose.noodles.yml config --services | Where-Object { $_ -like 'noodles-*' }
+if ($LASTEXITCODE -ne 0 -or -not $noodles) { throw 'Could not list noodles-* services from docker compose config.' }
+docker compose -f docker-compose.noodles.yml up -d --force-recreate --no-deps @noodles
+if ($LASTEXITCODE -ne 0) { throw "docker compose up of noodles-* failed (exit $LASTEXITCODE)." }
 
 Write-Host 'Done.'

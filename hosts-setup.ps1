@@ -94,12 +94,31 @@ if (-not $content) { $content = @() }
 
 # Always strip our previous block first, so this is idempotent and -Remove is
 # just the same operation without the re-add.
+# Only lines strictly between our two markers are dropped; every other line
+# (wfe/portal/admin/cdn from power\InitialSetup.ps1, anything a user added) is
+# kept. No array slicing: in PowerShell $a[0..-1] is "first and last", not
+# empty, and a missing end marker used to swallow the rest of the file.
+$content = @($content)
 $start = [array]::IndexOf($content, $marker)
 if ($start -ge 0) {
-    $end = [array]::IndexOf($content, $endMarker)
-    if ($end -lt $start) { $end = $content.Count - 1 }
-    $content = @($content[0..($start - 1)]) + @($content[($end + 1)..($content.Count - 1)])
-    $content = $content | Where-Object { $_ -ne $null }
+    $end = [array]::IndexOf($content, $endMarker, $start)
+    if ($end -lt 0) {
+        # No end marker: drop only the start marker plus the lines that look
+        # like our own entries, never unrelated lines after it.
+        $ourNames = $entries | ForEach-Object { $_.Name }
+        $kept = for ($i = 0; $i -lt $content.Count; $i++) {
+            $line = $content[$i]
+            if ($i -eq $start) { continue }
+            if ($i -gt $start -and $line -match '^\s*127\.0\.0\.1\s+(\S+)' -and $ourNames -contains $Matches[1]) { continue }
+            $line
+        }
+    }
+    else {
+        $kept = for ($i = 0; $i -lt $content.Count; $i++) {
+            if ($i -lt $start -or $i -gt $end) { $content[$i] }
+        }
+    }
+    $content = @($kept)
 }
 
 if ($Remove) {

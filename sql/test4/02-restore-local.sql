@@ -7,24 +7,29 @@
    Put the .bak files in   C:\workspace\local-infra\sql\backup
    The container sees that folder as   /backup
 
-   DESIGN: databases keep their original names.
+   DESIGN: backups are restored under LOCAL names.
 
-   Real environments name databases <env>_<group>_<db>:
-     test4_power_supportcentre, test4_eo_supportcentre, prod_power_supportcentre...
-   and the configuration addresses them through a prefix:
-     Generic              = ...Initial Catalog=test4_power_{0}
-     SupportCentreSchema  = test4_power_supportcentre.dbo
-     DealerSchema         = test4_power_{0}.dbo
+     <@SourcePrefix>_<role>.bak  ->  <@TargetPrefix>_<role>
+     test4_power_supportcentre   ->  dev_uk_supportcentre
+     test4_power_jst             ->  dev_uk_jst
 
-   Keeping the names means the local instance is the same shape as TEST4:
-   switching group is a configuration change, and adding a group or a dealer is
-   just another .bak dropped in this folder and a re-run of this script.
-   Renaming everything to a single dev_uk_* namespace would make that impossible.
+   The shared databases (supportcentre, productcatalogue, nservicebus) are
+   always restored, and so is every dealer backup of the group in /backup
+   (test4_power_idl, test4_power_jst, ...): the support centre's dealer views
+   are UNION ALL over all of them, and break if one is missing. @DealerCode is
+   the main dealer - its backup is required. The configuration reaches a dealer
+   as dev_uk_{0} with {0} = the dealer code, so the code itself is never changed. ../init/20-docker-overrides.sql rewrites the
+   catalog prefix in the configuration to match.
+
+   The three settings below come from .env (INFRA_BACKUP_PREFIX,
+   INFRA_DB_PREFIX, INFRA_DEALER_CODE); setup-local.bat substitutes them. Run
+   by hand, edit them here.
 
    Two things this handles that a plain RESTORE does not:
 
    1. Discovery. It reads whatever .bak files are in /backup, so you never edit
-      a list. New group, new dealer - drop the file in and run again.
+      a list. Files that are not part of the selected group are listed and
+      skipped.
 
    2. Logical file names differ per database, so a hardcoded MOVE list breaks.
       This reads RESTORE FILELISTONLY per backup and builds MOVE from the actual
@@ -42,6 +47,9 @@ DECLARE @BackupDir NVARCHAR(500) = N'/backup/';              -- path INSIDE the 
 DECLARE @DataDir   NVARCHAR(500) = N'/var/opt/mssql/data/';  -- where the restored files land
 DECLARE @WhatIf    BIT = 1;   -- 1 = print the RESTORE statements only, 0 = actually restore
 DECLARE @Overwrite BIT = 0;   -- 1 = restore over a database that already exists
+DECLARE @SourcePrefix NVARCHAR(100) = N'test4_power';  -- INFRA_BACKUP_PREFIX: backups are <this>_<role>.bak
+DECLARE @TargetPrefix NVARCHAR(100) = N'dev_uk';       -- INFRA_DB_PREFIX: restored as <this>_<role>
+DECLARE @DealerCode   NVARCHAR(50)  = N'jst';          -- INFRA_DEALER_CODE: the main dealer, must be present
 
 -- ---------------------------------------------------------------------
 -- Refuse to run anywhere but the local container
@@ -65,14 +73,15 @@ IF OBJECT_ID('tempdb..#work') IS NOT NULL DROP TABLE #work;
 CREATE TABLE #work
 (
     fname     NVARCHAR(500) NOT NULL,
+    source_db SYSNAME       NOT NULL,
     target_db SYSNAME       NULL,
     note      NVARCHAR(200) NULL
 );
 
--- Derive the database name from the file name. Our own backup script writes
--- <database>_yyyyMMdd_HHmmss.bak, so strip that suffix when it is there;
+-- Derive the source database name from the file name. Our own backup script
+-- writes <database>_yyyyMMdd_HHmmss.bak, so strip that suffix when it is there;
 -- otherwise take the base name as-is, which covers files handed over by the DBA.
-INSERT INTO #work (fname, target_db)
+INSERT INTO #work (fname, source_db)
 SELECT f.fname,
        CASE
            WHEN base LIKE N'%\_[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]\_[0-9][0-9][0-9][0-9][0-9][0-9]' ESCAPE N'\'
@@ -90,11 +99,36 @@ BEGIN
     RETURN;
 END
 
+-- Map <SourcePrefix>_<role> to <TargetPrefix>_<role>: the shared databases
+-- and every dealer of the group.
+UPDATE w
+   SET target_db = CASE WHEN w.source_db LIKE REPLACE(@SourcePrefix, N'_', N'[_]') + N'[_]%'
+                        THEN @TargetPrefix + N'_' + r.role END,
+       note      = CASE WHEN w.source_db NOT LIKE REPLACE(@SourcePrefix, N'_', N'[_]') + N'[_]%'
+                        THEN N'skipped - not a ' + @SourcePrefix + N'_* backup (INFRA_BACKUP_PREFIX)'
+                   END
+  FROM #work w
+ CROSS APPLY (SELECT SUBSTRING(w.source_db, LEN(@SourcePrefix) + 2, 200) AS role) AS r;
+
+-- Without the support centre or the dealer nothing starts, so stop here
+-- rather than restore half a group.
+IF NOT EXISTS (SELECT 1 FROM #work WHERE target_db = @TargetPrefix + N'_supportcentre')
+BEGIN
+    RAISERROR (N'No %s_supportcentre backup in /backup (check INFRA_BACKUP_PREFIX).', 16, 1, @SourcePrefix);
+    RETURN;
+END
+IF NOT EXISTS (SELECT 1 FROM #work WHERE target_db = @TargetPrefix + N'_' + @DealerCode)
+BEGIN
+    RAISERROR (N'No %s_%s backup in /backup (check INFRA_DEALER_CODE).', 16, 1, @SourcePrefix, @DealerCode);
+    RETURN;
+END
+
 -- Keep only the newest file when several exist for the same database.
 ;WITH ranked AS (
     SELECT fname, target_db,
            ROW_NUMBER() OVER (PARTITION BY target_db ORDER BY fname DESC) AS rn
       FROM #work
+     WHERE note IS NULL
 )
 UPDATE w
    SET note = N'superseded by a newer file'
@@ -109,6 +143,7 @@ UPDATE #work
    AND @Overwrite = 0;
 
 SELECT fname AS backup_file,
+       source_db,
        target_db AS will_restore_as,
        ISNULL(note, N'ready') AS status
   FROM #work
@@ -228,6 +263,10 @@ DEALLOCATE map_cursor;
 IF @WhatIf = 1
     RAISERROR (N'@WhatIf was 1: nothing was restored. Review the statements above, then set @WhatIf = 0.', 10, 1);
 
+-- Code inside the restored databases (synonyms, views, procedures) still
+-- names test4_power_*; ../init/30-rename-db-references.sql repoints it and
+-- setup-local.bat runs it next.
+
 -- ---------------------------------------------------------------------
 -- What is on the local instance now, grouped by environment prefix
 -- ---------------------------------------------------------------------
@@ -251,7 +290,7 @@ SELECT d.name,
    before repointing it and it will talk to the test environment for real,
    including sending email.
 
-   That script rewrites only the infrastructure endpoints and leaves the group
-   prefixes (test4_power_{0} and so on) alone, which is what keeps this local
-   copy a faithful mirror.
+   That script rewrites the infrastructure endpoints and the catalog prefix
+   (test4_power_{0} -> dev_uk_{0}) so the configuration finds the databases
+   restored above.
    ===================================================================== */

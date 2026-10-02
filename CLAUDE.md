@@ -16,10 +16,12 @@ These names live in more than one file. Renaming one without the others breaks s
 
 | What | Where it is used besides `docker-compose.yml` |
 |---|---|
+| Compose files and project names (`docker-compose.yml`=power, `docker-compose.api.yml`=api-power, `docker-compose.noodles.yml`=noodles) | `DC_POWER` / `DC_API` / `DC_NOODLES` in `setup-local.bat` and `ops-local.bat`, `reset-scheduled-tasks.ps1`, `clone-apis.ps1`, `cleanup-local.bat` (`PROJECTS`) |
 | Container/service names (`mssql`, `rabbit`, `noodles-*`, `noodles-build`) | `setup-local.bat` (`wait_healthy`, `docker exec`), `ops-local.bat`, `reset-scheduled-tasks.ps1` |
-| Profiles (`all`, `noodles`, `apis`) | `setup-local.bat` (`--wipe` = `--profile all down -v`), `ops-local.bat` |
-| Mount path `/init/` and SQL file names (`20-docker-overrides.sql`, `02-restore-local.sql`) | `setup-local.bat`, `ops-local.bat` |
-| Variables `MSSQL_SA_PASSWORD`, `INFRA_DB_PREFIX`, `INFRA_DEALER_GROUP`, `INFRA_ENVIRONMENT`, `LOCAL_HOSTNAME` | `.env`, `.env.local.example`, `setup-local.bat`, `ops-local.bat`, `hosts-setup.ps1`, SQL |
+| Profiles (`search`, `build`) and the API service list (`API_SERVICES` in `ops-local.bat`) | `setup-local.bat` (`--wipe` = `down -v` of all three files), `ops-local.bat` |
+| `DECLARE @SourcePrefix / @TargetPrefix / @DealerCode / @WhatIf` lines in `02-restore-local.sql`, `20-docker-overrides.sql` and `30-rename-db-references.sql` | `:run_sql` in `setup-local.bat` and `ops-local.bat` rewrites them by regex - keep the `DECLARE @Name ... = N'value'` shape |
+| Mount path `/init/` and SQL file names (`20-docker-overrides.sql`, `30-rename-db-references.sql`, `02-restore-local.sql`) | `setup-local.bat`, `ops-local.bat` |
+| Variables `MSSQL_SA_PASSWORD`, `INFRA_DB_PREFIX`, `INFRA_BACKUP_PREFIX`, `INFRA_DEALER_CODE`, `INFRA_DEALER_GROUP`, `INFRA_ENVIRONMENT`, `LOCAL_HOSTNAME` | `.env`, `.env.local.example`, `setup-local.bat`, `ops-local.bat`, `hosts-setup.ps1`, SQL |
 | `COMPOSE_ENV_FILES=.env,.env.local` | `setup-local.bat`, `ops-local.bat`: keep both identical |
 | Ports and hostnames (for example config-api `localhost:8080`) | `setup-local.bat` (`wait_http`), `power-local-setup.ps1`, `config-samples/*`, `sql/init/20-docker-overrides.sql` |
 | Script file names | `setup-local.bat`, `ops-local.bat`, `README.md` |
@@ -39,7 +41,7 @@ This table is not exhaustive. Always grep.
    - Deleted script: remove its calls and its row in `README.md`.
    - Scripts stay idempotent and safe to re-run.
 4. **Update `README.md`** (scripts table, flags, bring-up order) and `config-samples/*` if affected.
-5. **Validate:** run `docker compose config` and `docker compose --profile all config`, parse-check
+5. **Validate:** run `docker compose -f <file> --profile all config` for each of the three compose files, parse-check
    any edited `.ps1`, and read through `.bat` control flow (`goto`, labels, `exit /b`, `%~dp0`).
    Say what you could not verify.
 6. **Report breaking effects for existing users:** do they need `--wipe`, an `.env.local` edit,
@@ -49,7 +51,7 @@ This table is not exhaustive. Always grep.
 
 - `setup-local.bat` / `ops-local.bat`: **no** `EnableDelayedExpansion`, because the password may
   contain `!`. Keep the flags `--wipe`, `--skip-hosts`, `--skip-restore`, `--skip-build`,
-  `--skip-noodles`, `--apis` and `--power` working.
+  `--skip-noodles`, `--skip-pull`, `--apis` and `--power` working.
 - `cleanup-local.bat` only touches this project's images and build cache. Never volumes,
   running containers or other Docker projects.
 - `.env.local` and `.bak` files are never committed. A new required secret goes into

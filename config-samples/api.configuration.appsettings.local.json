@@ -8,19 +8,19 @@
     "",
     "'Generic' carries the <env>_<group> prefix. {0} is replaced at runtime with",
     "the database role - ConnectionProvider.DefaultDatabase is 'supportcentre',",
-    "so this instance opens test4_power_supportcentre.",
+    "so this instance opens dev_uk_supportcentre.",
     "",
-    "To work against a different group, restore that group's .bak files and change",
-    "two values here, then restart the API. Nothing else moves:",
+    "The TEST4 backups are restored as dev_uk_* (INFRA_DB_PREFIX in local-infra/.env)",
+    "whatever the group, so only DealerGroup changes between groups:",
     "",
-    "   power (pow)   Initial Catalog=test4_power_{0}   DealerGroup: pow",
-    "   euroffice     Initial Catalog=test4_eo_{0}      DealerGroup: eog",
-    "   ei            Initial Catalog=test4_ei_{0}      DealerGroup: ei0",
+    "   power (pow)   Initial Catalog=dev_uk_{0}   DealerGroup: pow",
+    "   euroffice     Initial Catalog=dev_uk_{0}   DealerGroup: eog",
+    "   ei            Initial Catalog=dev_uk_{0}   DealerGroup: ei0",
     "",
     "Port 8080 matches ConfigurationUrl in every Noodles appsettings.json.",
     "",
-    "Only 'Generic' differs from what the repo ships - the repo has",
-    "Data Source=. and the dev_uk_{0} prefix."
+    "Only the server and login in 'Generic' differ from what the repo ships - the",
+    "repo has Data Source=. with the same dev_uk_{0} prefix."
   ],
   "Logging": {
     "LogLevel": {
@@ -33,7 +33,7 @@
   "DealerGroup": "pow",
   "Environment": "local",
   "ConfigChangeInterval": "00:00:30",
-  "Generic": "Data Source=localhost,1433;Initial Catalog=test4_power_{0};User Id=EuroWebsite;Password=pensandpencils;Language=British;MultipleActiveResultSets=true;Encrypt=false;TrustServerCertificate=True;",
+  "Generic": "Data Source=localhost,1433;Initial Catalog=dev_uk_{0};User Id=EuroWebsite;Password=pensandpencils;Language=British;MultipleActiveResultSets=true;Encrypt=false;TrustServerCertificate=True;",
   "ConfigurationApiPort": "8080",
   "AzureKeyVaultSecretsSource.KeyVaultUrl": ""
 }

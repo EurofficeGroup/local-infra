@@ -2,11 +2,25 @@
 
 Local EurofficeGroup stack: SQL Server, RabbitMQ, Redis, Mailpit, Configuration API, and Noodles services in Docker. Power (.NET Framework 4.7.2) runs on the host under IIS / Rider — **not** in compose.
 
+## Three Docker Desktop groups
+
+The stack is three compose projects, so Docker Desktop shows three groups:
+
+| Group (project) | File | Containers |
+|---|---|---|
+| `power` | `docker-compose.yml` | mssql, rabbit, redis, mailpit; elastic, kibana with `--profile search` |
+| `api-power` | `docker-compose.api.yml` | config-api, api-tax, api-pricing, api-product, api-payments, api-audience |
+| `noodles` | `docker-compose.noodles.yml` | the sixteen `noodles-*` (`noodles-build` with `--profile build`) |
+
+They share the external network `hostnet`, created by `power`, so start `power` first. `depends_on` cannot cross projects; `setup-local.bat` waits for mssql/rabbit and config-api itself.
+
+Docker Desktop has no nested groups, so there is no common parent group above the three.
+
 ## Quick start
 
-1. Place the group's `.bak` files in `sql\backup\` (original TEST4 names, e.g. `test4_power_supportcentre.bak`).
+1. Place the group's `.bak` files in `sql\backup\` (original TEST4 names, e.g. `test4_power_supportcentre.bak`, `test4_power_jst.bak`). They are restored as `dev_uk_*` — see step 2 below.
 2. Copy `.env.local.example` → `.env.local` and set **`MSSQL_SA_PASSWORD`** (gitignored; required). The password must meet SQL Server complexity rules or the `mssql` container will not start.
-3. Check the group switch in `.env` (`INFRA_DB_PREFIX`, `INFRA_DEALER_GROUP`, `INFRA_ENVIRONMENT`).
+3. Check the group switch in `.env` (`INFRA_DB_PREFIX`, `INFRA_BACKUP_PREFIX`, `INFRA_DEALER_CODE`, `INFRA_DEALER_GROUP`, `INFRA_ENVIRONMENT`).
 4. Run **as Administrator**:
 
 ```bat
@@ -25,12 +39,13 @@ Options:
 
 | Flag | Effect |
 |---|---|
-| `--wipe` | `docker compose --profile all down -v` first, then full setup from a clean slate |
+| `--wipe` | `docker compose down -v` of all three projects first, then full setup from a clean slate |
 | `--skip-hosts` | Skip `hosts-setup.ps1` |
 | `--skip-restore` | Skip restore / overrides (DB already present) |
 | `--skip-build` | Skip image builds (already built) |
 | `--skip-noodles` | Core + SQL only; no config-api / noodles |
-| `--apis` | Also bring up satellite APIs (`clone-apis` + profile `apis`) |
+| `--skip-pull` | Step 5 clones missing repos but does not `git pull` the existing ones |
+| `--apis` | No longer needed - the satellite APIs are always cloned (if missing), built and started. Still accepted. |
 | `--power` | Run `power-local-setup.ps1` at the end (needs IIS sites + WebConfigPicker) |
 
 ---
@@ -62,7 +77,7 @@ Runtime config for DB-driven keys is **not** read from `appsettings.json` — it
 | `sql/test4/02-restore-local.sql` | After `.bak` files are in `sql/backup` | Restores under original database names |
 | `sql/init/20-docker-overrides.sql` | After restore, **against support-centre** | Repoints config at containers + `EnableInstallers` / `Environment=local` |
 | `reset-scheduled-tasks.ps1` | After overrides + noodles | Clears stale NSB reply addresses, recreates noodles |
-| `clone-apis.ps1` | Optional | Clones satellite API repos |
+| `clone-apis.ps1` | Step 5 of `setup-local.bat` | Clones `noodles`, `api.configuration` and the five API repos if missing; `git pull --ff-only` on clean ones, never touches local changes (`-NoPull` / `--skip-pull` to skip) |
 | `power-local-setup.ps1` | After WebConfigPicker (elevated) | Sets `ConfigurationUrl`, `ForceIntegratedSecurity=false`, local API URLs |
 | `setup-local.bat` | From scratch | Runs the above in order (except manual Power) |
 | `ops-local.bat` | Day-to-day | Rebuild/restart noodles, config-api, APIs; re-run overrides; reset tasks |
@@ -78,7 +93,7 @@ Runtime config for DB-driven keys is **not** read from `appsettings.json` — it
 - .NET 8 SDK (noodles, config-api); .NET Framework 4.7.2 + IIS/Rider (power)
 - VPN — for NuGet `build.euroffice.co.uk` on first build
 - `.env.local` with `MSSQL_SA_PASSWORD` (copy from `.env.local.example`)
-- Group backup: e.g. `test4_power_supportcentre`, `_idl`, `_jst`, `_nservicebus`, `_productcatalogue`
+- Group backup: `test4_power_supportcentre`, `_productcatalogue`, `_nservicebus` and every dealer (`_idl`, `_jst`)
 
 ### 1. Hosts + LOCAL_HOSTNAME
 
@@ -97,12 +112,25 @@ Maps `mssql`, `rabbit`, `redis`, `mailpit`, `config-api`, `elastic` → `127.0.0
 Shared defaults stay in `.env`:
 
 ```
-INFRA_DB_PREFIX=test4_power
+INFRA_DB_PREFIX=dev_uk            # local databases: dev_uk_{0}
+INFRA_BACKUP_PREFIX=test4_power   # backups:         test4_power_{0}.bak
+INFRA_DEALER_CODE=jst             # the dealer:      {0} = jst
 INFRA_DEALER_GROUP=pow
 INFRA_ENVIRONMENT=local
 ```
 
-Other groups: `test4_eo` / `eog`, `test4_ei` / `ei0`.
+`{0}` is the database role or the dealer code:
+
+| Backup in `sql\backup\` | Local database |
+|---|---|
+| `test4_power_supportcentre.bak` | `dev_uk_supportcentre` |
+| `test4_power_productcatalogue.bak` | `dev_uk_productcatalogue` |
+| `test4_power_nservicebus.bak` | `dev_uk_nservicebus` |
+| `test4_power_<dealer>.bak` (each one) | `dev_uk_<dealer>`, e.g. `dev_uk_idl`, `dev_uk_jst` |
+
+Every dealer backup of the group in `sql\backup` is restored: the support centre's dealer views (`dlr_Dealers`, `cus_Customers`, ...) are `UNION ALL` over all dealers and fail if one is missing. `INFRA_DEALER_CODE` is the main dealer - its backup is required and it is Power's `DealerId`. The three values can be overridden per machine in `.env.local` (see `.env.local.example`).
+
+Other groups: `INFRA_BACKUP_PREFIX=test4_eo` / `eog`, `test4_ei` / `ei0`. All groups land under the same `dev_uk_*` names, so switching group needs `setup-local.bat --wipe`.
 
 The SQL `sa` password is **not** in `.env`. Create a gitignored local file once:
 
@@ -117,14 +145,14 @@ set COMPOSE_ENV_FILES=.env,.env.local
 docker compose up -d
 ```
 
-### 3. Core infrastructure
+### 3. Core infrastructure (group `power`)
 
 ```bat
 set COMPOSE_ENV_FILES=.env,.env.local
 docker compose up -d
 ```
 
-Starts **mssql, rabbit, redis, mailpit**. Wait until `mssql` and `rabbit` are healthy.
+Starts **mssql, rabbit, redis, mailpit** (`docker-compose.yml` is the default file). Wait until `mssql` and `rabbit` are healthy.
 
 ### 4. SQL: login → restore → overrides
 
@@ -145,8 +173,12 @@ Get-Content .\sql\test4\02-restore-local.sql |
 Overrides are **mandatory** — without them services talk to real TEST4 (including SMTP):
 
 ```bash
-docker exec -i mssql /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "<MSSQL_SA_PASSWORD>" -C -d test4_power_supportcentre -i /init/20-docker-overrides.sql
+docker exec -i mssql /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "<MSSQL_SA_PASSWORD>" -C -d dev_uk_supportcentre -i /init/20-docker-overrides.sql
 ```
+
+After the restore, `sql/init/30-rename-db-references.sql` repoints synonyms / views / procedures inside the databases from `test4_power_*` to `dev_uk_*` (`ops-local.bat rename-refs` re-runs it).
+
+Run by hand, the scripts use the defaults written in their `DECLARE @SourcePrefix / @TargetPrefix / @DealerCode` lines (`test4_power` / `dev_uk` / `jst`); edit those if `.env` differs. `setup-local.bat` and `ops-local.bat overrides` substitute the `.env` values for you.
 
 Verify:
 
@@ -161,18 +193,20 @@ Expect: `Environment=local`, `EnableInstallers=true`, Rabbit/Cache pointing at `
 ### 5. Build images (once, VPN required)
 
 ```bash
-docker compose build noodles-build config-api
+docker compose -f docker-compose.noodles.yml build noodles-build
+docker compose -f docker-compose.api.yml build config-api
 ```
 
 All sixteen noodles services share one image `infra/noodles:local`. Without `noodles-build`, a cold `up` would fan out into sixteen identical builds.
 
-### 6. Config API + Noodles
+### 6. Config API + Noodles (groups `api-power`, `noodles`)
 
 ```bash
-docker compose --profile noodles up -d
+docker compose -f docker-compose.api.yml up -d config-api
+docker compose -f docker-compose.noodles.yml up -d
 ```
 
-`config-api` depends on healthy `mssql` + `rabbit`. Noodles depend on `config-api`.
+Start `config-api` only after `mssql` and `rabbit` are healthy, and Noodles after `config-api` answers. These are separate projects, so compose does not enforce the order. A Noodles service started too early exits and is restarted by `restart: unless-stopped`.
 
 Check:
 
@@ -180,12 +214,12 @@ Check:
 http://localhost:8080/Configuration/1/Configuration/service=api.configuration
 ```
 
-Optional satellite APIs (Pricing, Tax, Product, Payments, Audience):
+The satellite APIs (Pricing, Tax, Product, Payments, Audience) start with config-api; by hand:
 
 ```powershell
 .\clone-apis.ps1
-docker compose --profile apis build
-docker compose --profile apis up -d
+docker compose -f docker-compose.api.yml build
+docker compose -f docker-compose.api.yml up -d
 ```
 
 ### 7. Reset scheduled tasks
@@ -223,7 +257,7 @@ Power sites are **not** containerised. They run under IIS (.NET Framework 4.7.2)
 4. **Group / dealer in `<appSettings>`** (each of Portal, FrontEnd, Support, Static):
    - `Environment` = `local`
    - `DealerGroup` = same as `.env` `INFRA_DEALER_GROUP` (e.g. `pow`)
-   - `DealerId` = a **real dealer number** from the restored DB (`idl` / `jst`)
+   - `DealerId` = `INFRA_DEALER_CODE` from `.env` (default `jst`) — the main dealer
 
    ```sql
    SELECT dlr_DealerNumber FROM dbo.dlr_Dealers;  -- against support-centre
@@ -244,13 +278,14 @@ Do **not** hand-edit `Web.config` for day-to-day env switches — use WebConfigP
 
 | Command | Brings up |
 |---|---|
-| `docker compose up -d` | Core: mssql, rabbit, redis, mailpit |
-| `docker compose --profile noodles up -d` | + config-api + all 16 noodles |
-| `docker compose up -d noodles-sales` | One service (naming it enables its profile) |
-| `docker compose --profile apis up -d` | + satellite APIs (+ config-api) |
-| `docker compose --profile search up -d` | Elasticsearch + Kibana |
-| `docker compose --profile all down` | Stop everything |
-| `docker compose --profile all down -v` | + wipe volumes (queues, Redis, DB) |
+| `docker compose up -d` | Group `power`: mssql, rabbit, redis, mailpit |
+| `docker compose --profile search up -d` | + Elasticsearch + Kibana (group `power`) |
+| `docker compose -f docker-compose.api.yml up -d config-api` | Group `api-power`: config-api only |
+| `docker compose -f docker-compose.api.yml up -d` | config-api + satellite APIs |
+| `docker compose -f docker-compose.noodles.yml up -d` | Group `noodles`: all 16 |
+| `docker compose -f docker-compose.noodles.yml up -d noodles-sales` | One Noodles service |
+| `docker compose -f <file> down` | Stop one group (stop `power` last - it owns `hostnet`) |
+| `setup-local.bat --wipe` | Wipe all three groups + volumes (queues, Redis, DB) |
 
 RAM/CPU limits live in `.env`; `MSSQL_SA_PASSWORD` lives in `.env.local` — leave the compose file alone.
 
@@ -275,6 +310,8 @@ Full table: [`config-samples/connection-strings.md`](config-samples/connection-s
 
 ```bash
 docker compose ps
+docker compose -f docker-compose.api.yml ps
+docker compose -f docker-compose.noodles.yml ps
 docker inspect <container> --format "{{.RestartCount}}"
 ```
 
@@ -335,11 +372,11 @@ cleanup-local.bat
 ```
 
 Requires `mssql`, `rabbit`, and `redis` to already be running. Cleanup is scoped with  
-`label=com.docker.compose.project=<COMPOSE_PROJECT_NAME>` (default `local-infra` from `.env`):
+`label=com.docker.compose.project=` power, api-power, noodles:
 
-- `docker builder prune` — only this project's build cache
-- `docker container prune` — only stopped containers of this project
-- `docker image prune` — only unused images built by this project
+- `docker builder prune` — only the build cache of `power`, `api-power`, `noodles`
+- `docker container prune` — only stopped containers of those projects
+- `docker image prune` — only unused images built by those projects
 
 It does **not** run global `docker system prune`. Volumes and other stacks on the machine stay untouched.
 

@@ -24,7 +24,7 @@
        Configuration API answers from whichever support centre it was pointed
        at. So "use my local database" is not a picker setting - it follows
        automatically once ConfigurationUrl is local, because our container reads
-       the restored test4_power_supportcentre and returns Data Source=mssql,1433.
+       the restored dev_uk_supportcentre and returns Data Source=mssql,1433.
 
        Which means: tick "Configuration API - Use local", or the site will read
        TEST4's configuration and go straight to the test database, no matter

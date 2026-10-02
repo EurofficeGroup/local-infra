@@ -1,4 +1,4 @@
-# Local databases: a mirror of TEST4, not a rename
+# Local databases: TEST4 backups restored as dev_uk_*
 
 Source server: **vm-tstdb-uks-02.datacentre.euroffice.com** (VPN required).
 The DBA is producing these five backups:
@@ -15,48 +15,66 @@ Do not rename them.
 
 ## The principle
 
-Databases keep their real names. Real environments are laid out as
-`<env>_<group>_<db>`, and the configuration addresses them through a prefix:
+Backups keep their TEST4 names in `sql/backup`; the databases are restored
+under local names. Three values in `.env` drive it:
 
 ```
-Generic              = ...Initial Catalog=test4_power_{0}
-SupportCentreSchema  = test4_power_supportcentre.dbo
-ProductCatalogueSchema = test4_power_productcatalogue.dbo
-DealerSchema         = test4_power_{0}.dbo
+INFRA_BACKUP_PREFIX=test4_power   ->  test4_power_{0}.bak
+INFRA_DB_PREFIX=dev_uk            ->  dev_uk_{0}
+INFRA_DEALER_CODE=jst             ->  the main dealer (Power's DealerId)
 ```
 
-Keep the names and the local instance has the same shape as TEST4: switching
-group is a configuration change, and adding a group or a dealer is one more
-`.bak` in the folder plus a re-run of the restore. That is the whole design.
+`{0}` is the database role (`supportcentre`, `productcatalogue`,
+`nservicebus`) or the dealer code, exactly as the configuration uses it:
 
-An earlier draft of these scripts renamed everything into a single `dev_uk_*`
-namespace, following the `local_sc.sql` seed in the Configuration API repo. That
-seed assumes one hardcoded group and would have made switching impossible — it
-is gone.
+```
+Generic              = ...Initial Catalog=dev_uk_{0}
+SupportCentreSchema  = dev_uk_supportcentre.dbo
+ProductCatalogueSchema = dev_uk_productcatalogue.dbo
+DealerSchema         = dev_uk_{0}.dbo        ({0} = jst -> dev_uk_jst)
+```
+
+Every dealer backup of the group is restored (`dev_uk_idl`, `dev_uk_jst`): the
+support centre's dealer views are `UNION ALL` over all of them.
+
+`dev_uk_{0}` is also the prefix the Configuration API repo ships for local use.
+The restored configuration still says `test4_power_*`; `20-docker-overrides.sql`
+rewrites that prefix. Dealer codes are never changed.
+
+The trade-off: every group lands under the same names, so only one group is
+on the instance at a time.
+
+Code inside the backups names the TEST4 databases too: synonyms in the dealer
+and support centre databases point at `test4_power_productcatalogue`, and the
+support centre's dealer views (`dlr_Dealers`, `cus_Customers`, `orh_OrderHeaders`,
+`vmv_*` - 94 of them) are `UNION ALL` over every dealer of the group.
+`30-rename-db-references.sql` rewrites the names. That is why every dealer
+backup must be there: a view whose dealer database is missing cannot be
+recompiled and is listed by the script.
 
 ## Switching group
 
-Restore the other group's backups into the same instance, then change two values
-in the Configuration API's `appsettings.json` and restart it:
+Put the other group's backups in `sql/backup`, set in `.env`, then
+`setup-local.bat --wipe`:
 
-| Group | `Generic` catalog | `DealerGroup` |
-|---|---|---|
-| power | `test4_power_{0}` | `pow` |
-| euroffice | `test4_eo_{0}` | `eog` |
-| ei | `test4_ei_{0}` | `ei0` |
+| Group | `INFRA_BACKUP_PREFIX` | `INFRA_DEALER_GROUP` | `INFRA_DEALER_CODE` |
+|---|---|---|---|
+| power | `test4_power` | `pow` | `jst` or `idl` |
+| euroffice | `test4_eo` | `eog` | `eo0` / `od0` |
+| ei | `test4_ei` | `ei0` | |
 
 Template: [`../../config-samples/api.configuration.appsettings.local.json`](../../config-samples/api.configuration.appsettings.local.json).
 
 On the Power side the matching values are `DealerGroup` and `DealerId` in
 `Web.config` — see
 [`../../config-samples/power.Web.config.local.appSettings.xml`](../../config-samples/power.Web.config.local.appSettings.xml).
-`DealerId` must be a dealer of the selected group: `idl` or `jst` for power,
-`eo0`/`od0` for euroffice.
+`DealerId` should be `INFRA_DEALER_CODE`; any restored dealer of the group works.
 
 ## Adding a dealer later
 
-A dealer is just another database, `test4_power_<dealer>`. Get the `.bak`, drop
-it in `sql/backup`, re-run the restore script — it discovers new files by itself.
+A dealer is one more backup, `test4_power_<dealer>.bak`. Drop it in
+`sql/backup` and run `setup-local.bat --wipe`; it is restored as
+`dev_uk_<dealer>`, and the support centre views pick it up.
 The dealer must also exist in `dlr_Dealers` in that group's support centre, which
 it will, since the support centre came from the same environment.
 
@@ -69,8 +87,9 @@ docker compose --profile db up -d
 | # | Script | Connect to | Notes |
 |---|---|---|---|
 | 1 | [`../init/00-login-and-databases.sql`](../init/00-login-and-databases.sql) | `localhost,1433` | Creates the `EuroWebsite` login. Creates no group databases. |
-| 2 | [`02-restore-local.sql`](02-restore-local.sql) | `localhost,1433` | Restores everything in `/backup` under its original name |
-| 3 | [`../init/20-docker-overrides.sql`](../init/20-docker-overrides.sql) | `-d test4_power_supportcentre` | Repoints endpoints. **Once per group.** |
+| 2 | [`02-restore-local.sql`](02-restore-local.sql) | `localhost,1433` | Restores the shared databases and the `INFRA_DEALER_CODE` dealer as `dev_uk_*` |
+| 3 | [`../init/30-rename-db-references.sql`](../init/30-rename-db-references.sql) | `localhost,1433` | Repoints synonyms / views / procedures from `test4_power_*` to `dev_uk_*`. |
+| 4 | [`../init/20-docker-overrides.sql`](../init/20-docker-overrides.sql) | `-d dev_uk_supportcentre` | Repoints endpoints and the catalog prefix. |
 
 Both scripts start at `@WhatIf = 1` and only print what they would do.
 
@@ -83,8 +102,9 @@ for real, including sending email to real addresses.
 
 The override script changes **endpoints only** — which server, which broker,
 which cache, which mail host. It rebuilds each connection string token by token
-so the `test4_power_{0}` catalog is preserved and only `Data Source` is swapped.
-Group prefixes are never touched. It also strips `Integrated Security`, which
+so only `Data Source` is swapped, then rewrites the catalog prefix
+`test4_power_` -> `dev_uk_` in every value (connection strings and the `*Schema`
+keys). It also strips `Integrated Security`, which
 cannot work from the Windows host against a Linux container, and substitutes the
 `EuroWebsite` login.
 

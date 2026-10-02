@@ -1,0 +1,229 @@
+# ======================================================================
+# EurofficeGroup - local infrastructure, part 2 of 3: group "api-power"
+#
+#   docker compose -f docker-compose.api.yml build                 # config-api + all APIs
+#   docker compose -f docker-compose.api.yml up -d                 # config-api + all APIs
+#   docker compose -f docker-compose.api.yml up -d config-api      # config-api only
+#
+# Needs the "power" project (docker-compose.yml) running first: mssql and
+# rabbit live there, on the shared network hostnet. depends_on cannot cross
+# projects, so setup-local.bat waits for them instead.
+# ======================================================================
+
+name: api-power
+
+networks:
+  hostnet:
+    name: hostnet
+    external: true    # created by docker-compose.yml (project power)
+
+services:
+
+  # ------------------------------------------------------------------
+  # Configuration API - every Noodles endpoint and every API calls this at
+  # startup. No profile: `up -d config-api` (or plain `up -d`) starts it.
+  # ------------------------------------------------------------------
+  config-api:
+    container_name: config-api
+    hostname: ${LOCAL_HOSTNAME}
+    image: ${CONFIG_API_IMAGE}
+    build:
+      context: ../api.configuration
+      dockerfile: ../local-infra/docker/api-configuration.Dockerfile
+    restart: unless-stopped
+    environment:
+      # The group switch. {0} is replaced with the database role at runtime,
+      # so this instance opens ${INFRA_DB_PREFIX}_supportcentre.
+      Generic: "Data Source=mssql,1433;Initial Catalog=${INFRA_DB_PREFIX}_{0};User Id=EuroWebsite;Password=pensandpencils;Language=British;MultipleActiveResultSets=true;Encrypt=false;TrustServerCertificate=True;"
+      DealerGroup: ${INFRA_DEALER_GROUP}
+      Environment: ${INFRA_ENVIRONMENT}
+      ConfigurationApiPort: "8080"
+    ports:
+      - "${CONFIG_API_PORT}:8080"
+    networks: [hostnet]
+    mem_limit: ${CONFIG_API_MEM}
+    mem_reservation: ${CONFIG_API_MEM_RES}
+    cpus: ${CONFIG_API_CPUS}
+
+
+  # ==================================================================
+  # Satellite APIs - the small services the sites call directly. No profile:
+  # they start with the rest of this file, like config-api.
+  #
+  # WHY THEY ARE HERE. Unlike the database, these are not needed for the sites
+  # to start - the IIS sites will happily call TEST4's copies over the VPN. That
+  # is exactly the problem: every basket render fans out into several round
+  # trips at ~70 ms each, which is where the remaining slowness comes from.
+  # Running them here turns those into local calls.
+  #
+  # PORTS ARE FIXED, NOT CHOSEN. WebConfigPicker writes these numbers into each
+  # site's web.config when you tick "Use local" (MainWindow.xaml.cs:595-625), so
+  # the containers have to listen on exactly them. They are published on the
+  # host because the callers - IIS, and Noodles containers via host.docker.internal
+  # - are not all inside this network.
+  #
+  #   9000  pricing
+  #   9005  tax
+  #   9020  product        also answers /DeliveryCharge - one service, one repo
+  #   9050  payments       see the note on the service below
+  #   9100  audience
+  #   9012  search         NOT here: that is the Elasticsearch API, deliberately
+  #                        left on TEST4 (the index is too big to host locally)
+  #
+  # Each is built from its own repo checked out next to this one. Missing ones:
+  #   .\clone-apis.ps1
+  # ==================================================================
+
+  api-tax:
+    container_name: api-tax
+    image: ${TAX_API_IMAGE}
+    build:
+      context: ../api.tax
+      dockerfile: ../local-infra/docker/api-service.Dockerfile
+      args:
+        PROJECT: src/EurofficeGroup.Api.Tax
+        ENTRY: EurofficeGroup.Api.Tax.dll
+        PORT: "9005"
+    restart: unless-stopped
+    environment:
+      DealerGroup: ${INFRA_DEALER_GROUP}
+      Environment: ${INFRA_ENVIRONMENT}
+      ConfigurationUrl: ${CONFIGURATION_URL}
+      # The key name Program.cs passes to ConfigureEoWebHostUsingStartup.
+      TaxApiPort: "9005"
+    ports:
+      - "${TAX_API_PORT}:9005"
+    volumes:
+      - ./files:/files
+    depends_on:
+      config-api:
+        condition: service_healthy
+    networks: [hostnet]
+    mem_limit: ${API_MEM}
+    mem_reservation: ${API_MEM_RES}
+    cpus: ${API_CPUS}
+
+
+  api-pricing:
+    container_name: api-pricing
+    image: ${PRICING_API_IMAGE}
+    build:
+      context: ../api.pricing
+      dockerfile: ../local-infra/docker/api-service.Dockerfile
+      args:
+        PROJECT: src/EurofficeGroup.Api.Pricing
+        ENTRY: EurofficeGroup.Api.Pricing.dll
+        PORT: "9000"
+    restart: unless-stopped
+    environment:
+      DealerGroup: ${INFRA_DEALER_GROUP}
+      Environment: ${INFRA_ENVIRONMENT}
+      ConfigurationUrl: ${CONFIGURATION_URL}
+      PricingApiPort: "9000"
+    ports:
+      - "${PRICING_API_PORT}:9000"
+    volumes:
+      - ./files:/files
+    depends_on:
+      config-api:
+        condition: service_healthy
+    networks: [hostnet]
+    mem_limit: ${API_MEM}
+    mem_reservation: ${API_MEM_RES}
+    cpus: ${API_CPUS}
+
+
+  # Product also serves DeliveryCharge - one process, two route prefixes, which
+  # is why the picker points both DeliveryChargeApiServiceUrl and
+  # ProductApiServiceUrl at 9020 and there is no separate Delivery Charge repo.
+  api-product:
+    container_name: api-product
+    image: ${PRODUCT_API_IMAGE}
+    build:
+      context: ../api.product
+      dockerfile: ../local-infra/docker/api-service.Dockerfile
+      args:
+        PROJECT: src/EurofficeGroup.Api.Product
+        ENTRY: EurofficeGroup.Api.Product.dll
+        PORT: "9020"
+    restart: unless-stopped
+    environment:
+      DealerGroup: ${INFRA_DEALER_GROUP}
+      Environment: ${INFRA_ENVIRONMENT}
+      ConfigurationUrl: ${CONFIGURATION_URL}
+      ProductApiPort: "9020"
+    ports:
+      - "${PRODUCT_API_PORT}:9020"
+    volumes:
+      - ./files:/files
+    depends_on:
+      config-api:
+        condition: service_healthy
+    networks: [hostnet]
+    mem_limit: ${API_MEM}
+    mem_reservation: ${API_MEM_RES}
+    cpus: ${API_CPUS}
+
+
+  api-audience:
+    container_name: api-audience
+    image: ${AUDIENCE_API_IMAGE}
+    build:
+      context: ../api.audience
+      dockerfile: ../local-infra/docker/api-service.Dockerfile
+      args:
+        PROJECT: src/EurofficeGroup.Api.Audience
+        ENTRY: EurofficeGroup.Api.Audience.dll
+        PORT: "9100"
+    restart: unless-stopped
+    environment:
+      DealerGroup: ${INFRA_DEALER_GROUP}
+      Environment: ${INFRA_ENVIRONMENT}
+      ConfigurationUrl: ${CONFIGURATION_URL}
+      AudienceApiPort: "9100"
+    ports:
+      - "${AUDIENCE_API_PORT}:9100"
+    volumes:
+      - ./files:/files
+    depends_on:
+      config-api:
+        condition: service_healthy
+    networks: [hostnet]
+    mem_limit: ${API_MEM}
+    mem_reservation: ${API_MEM_RES}
+    cpus: ${API_CPUS}
+
+
+  # 9050, not 9052. WebConfigPicker disagrees with itself: the branch that
+  # writes the SERVICE config sets PaymentsApiPort=9050, while the branch that
+  # writes the SITES' web.config sets PaymentsApiServiceUrl to :9052
+  # (MainWindow.xaml.cs:620 vs :798). 9050 is the real one - it is the fallback
+  # compiled into PaymentsApiInstaller in power and noodles. power-local-setup.ps1
+  # rewrites the sites to 9050 so the two ends meet.
+  api-payments:
+    container_name: api-payments
+    image: ${PAYMENTS_API_IMAGE}
+    build:
+      context: ../api.payments
+      dockerfile: ../local-infra/docker/api-service.Dockerfile
+      args:
+        PROJECT: src/EurofficeGroup.Api.Payments
+        ENTRY: EurofficeGroup.Api.Payments.dll
+        PORT: "9050"
+    restart: unless-stopped
+    environment:
+      DealerGroup: ${INFRA_DEALER_GROUP}
+      Environment: ${INFRA_ENVIRONMENT}
+      ConfigurationUrl: ${CONFIGURATION_URL}
+      PaymentsApiPort: "9050"
+    ports:
+      - "${PAYMENTS_API_PORT}:9050"
+    volumes:
+      - ./files:/files
+    depends_on:
+      config-api:
+        condition: service_healthy
+    networks: [hostnet]
+    mem_limit: ${API_MEM}
+    mem_reservation: ${API_MEM_RES}
+    cpus: ${API_CPUS}

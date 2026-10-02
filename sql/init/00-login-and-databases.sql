@@ -17,10 +17,10 @@
 --                                   scripts, plus the Configuration API's own
 --                                   appsettings.json
 --   EuroService / 0*lEVEL*gIVES?    19 of them, notably NServiceBus/Persistence
---                                   (test4_power_nservicebus)
+--                                   (dev_uk_nservicebus, restored from test4_power_nservicebus)
 --
 -- Deliberately does NOT create any <env>_<group>_* databases. Those arrive by
--- restore, under their original names. See sql/test4/README.md.
+-- restore, as <INFRA_DB_PREFIX>_* (dev_uk_*). See sql/test4/README.md.
 -- ---------------------------------------------------------------------
 
 SET NOCOUNT ON;
