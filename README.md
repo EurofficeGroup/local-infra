@@ -78,7 +78,7 @@ Runtime config for DB-driven keys is **not** read from `appsettings.json` — it
 | `sql/init/20-docker-overrides.sql` | After restore, **against support-centre** | Repoints config at containers + `EnableInstallers` / `Environment=local` |
 | `reset-scheduled-tasks.ps1` | After overrides + noodles | Clears stale NSB reply addresses, recreates noodles |
 | `clone-apis.ps1` | Step 5 of `setup-local.bat` | Clones `noodles`, `api.configuration` and the five API repos if missing; `git pull --ff-only` on clean ones, never touches local changes (`-NoPull` / `--skip-pull` to skip) |
-| `power-local-setup.ps1` | After WebConfigPicker (elevated) | Sets `ConfigurationUrl`, `ForceIntegratedSecurity=false`, local API URLs |
+| `power-local-setup.ps1` | After WebConfigPicker, or whenever the Power `web.config`s were reset (elevated) | Sets `ConfigurationUrl`, `ForceIntegratedSecurity=false`, local API URLs, local Redis/RabbitMQ, and `Environment` / `DealerGroup` / `DealerId` from `.env`. Also `ops-local.bat power` |
 | `setup-local.bat` | From scratch | Runs the above in order (except manual Power) |
 | `ops-local.bat` | Day-to-day | Rebuild/restart noodles, config-api, APIs; re-run overrides; reset tasks |
 | `cleanup-local.bat` | When disk is full | Prunes **this project's** build cache + unused images (compose label); never touches volumes, running containers, or other Docker apps |
@@ -188,7 +188,8 @@ WHERE cfg_Dealer IS NULL AND cfg_Service IS NULL
   AND cfg_Name IN ('Environment', 'EnableInstallers', 'Rabbit', 'Cache', 'ConfigurationUrl');
 ```
 
-Expect: `Environment=local`, `EnableInstallers=true`, Rabbit/Cache pointing at `rabbit` / `redis`.
+Expect: `Environment=local`, `EnableInstallers=true`, Rabbit/Cache pointing at `rabbit` / `redis`,
+and `SiteContentCdnUrl` / `Content.StaticContentUrl` = `//cdn` (the local Static site — otherwise Power pages render without styles, because TEST4's `test4-pow-static.office-power.net` is unreachable).
 
 ### 5. Build images (once, VPN required)
 
@@ -251,13 +252,22 @@ Power sites are **not** containerised. They run under IIS (.NET Framework 4.7.2)
 3. **Elevated:** `.\power-local-setup.ps1` (after every WebConfigPicker run). Covers what the picker does not:
    - **`Generic.ForceIntegratedSecurity` = `false`** — otherwise Power strips SQL credentials and uses Windows auth, which the Linux SQL container rejects
    - guarantees `ConfigurationUrl` and local satellite API URLs (Pricing, Tax, Product, Payments, Audience)
+   - writes the picker's local Redis / RabbitMQ values again (`Cache`, `Redis.ConnectionString`, `Rabbit`, `UseAzureServiceBus=false`) — a no-op after the picker
+   - **group / dealer** from `.env` (`.env.local` wins), see step 4
 
    Or pass `--power` to `setup-local.bat` after the sites already exist.
 
-4. **Group / dealer in `<appSettings>`** (each of Portal, FrontEnd, Support, Static):
-   - `Environment` = `local`
-   - `DealerGroup` = same as `.env` `INFRA_DEALER_GROUP` (e.g. `pow`)
-   - `DealerId` = `INFRA_DEALER_CODE` from `.env` (default `jst`) — the main dealer
+   **Configs got reset** (git checkout, a picker run for another environment)? Just run, elevated:
+   `ops-local.bat power` (same script). No picker needed - the committed `web.config` becomes local too.
+   Rollback: `web.config.before-local` next to each site's `web.config`.
+
+4. **Group / dealer in `<appSettings>`** — set by `power-local-setup.ps1`:
+   - `Environment` = `INFRA_ENVIRONMENT` (`local`), all four sites
+   - `DealerGroup` = `INFRA_DEALER_GROUP` (e.g. `pow`, lower-case), all four sites
+   - `DealerId` = `INFRA_DEALER_CODE` (default `jst`) — the main dealer; FrontEnd (`wfe`) and Portal only.
+     Support and Static run without one. `DealerId=POW` (the committed value) is the group, not a dealer,
+     and fails with *Cannot open database "dev_uk_POW"*.
+   - Another dealer for one run: `.\power-local-setup.ps1 -DealerCode idl`
 
    ```sql
    SELECT dlr_DealerNumber FROM dbo.dlr_Dealers;  -- against support-centre
@@ -395,9 +405,10 @@ Typical loop after the stack is healthy:
 | Need a container bounce, same image | `ops-local.bat noodles-restart` |
 | `api.configuration` source | `ops-local.bat config-rebuild` |
 | Satellite APIs (pricing, tax, …) | `ops-local.bat apis-rebuild` |
-| Only cfg endpoints in SQL (Rabbit/Redis/…) | `ops-local.bat overrides` |
+| Only cfg endpoints in SQL (Rabbit/Redis/CDN/…) | `ops-local.bat overrides`, then `ops-local.bat config-restart` and restart the Power sites — they cache configuration until the app restarts |
 | Stale scheduled-task reply addresses | `ops-local.bat reset-tasks` |
 | Core infra only (SQL / Rabbit / Redis / Mailpit) | `ops-local.bat core-restart` |
+| Power `web.config`s lost their local settings (elevated prompt) | `ops-local.bat power` |
 
 ### How to run
 
@@ -417,6 +428,7 @@ ops-local.bat apis-restart
 ops-local.bat overrides
 ops-local.bat reset-tasks
 ops-local.bat core-restart
+ops-local.bat power
 ```
 
 4. The window prints progress, then a green `Done.` and waits for a keypress.

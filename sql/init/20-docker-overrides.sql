@@ -277,6 +277,16 @@ INSERT INTO #flat (name, value) VALUES
     (N'RemoteService.Password',  N''),
     (N'RemoteService.MandrillApiKey', N''),
 
+    -- STATIC CONTENT (css/less/js bundles, images). TEST4 says
+    -- https://test4-pow-static.office-power.net, which a developer machine cannot
+    -- reach, so Power renders pages with no styles at all. Point it at the local
+    -- 'cdn' IIS site (EurofficeGroup.Web.Static, created by power/InitialSetup.ps1).
+    -- Protocol-relative, as api.configuration/scripts/local_sc.sql has it.
+    -- Content.StaticContentUrl is the newer name of the same setting
+    -- (database migration 201909101619_PD8750); both exist, per dealer and global.
+    (N'SiteContentCdnUrl',       N'//cdn'),
+    (N'Content.StaticContentUrl',N'//cdn'),
+
     -- Noodles gateway/uploader hosts
     (N'NoodlesActionsServer',    N'noodles-actions'),
     (N'NoodlesGatewayServer_0',  N'localhost'),
@@ -383,5 +393,5 @@ SELECT cfg_Name, cfg_Value
  ORDER BY cfg_Name;
 
 PRINT N'Rows above still reference something outside this machine - review them.';
-PRINT N'Some are harmless (public URLs, CDN, payment gateways); a broker, database or mail host is not.';
+PRINT N'Some are harmless (public URLs, payment gateways); a broker, database or mail host is not.';
 GO

@@ -21,6 +21,8 @@ rem    overrides               Re-run 20-docker-overrides.sql on support-centre
 rem    rename-refs             Re-run 30-rename-db-references.sql
 rem    reset-tasks             Clear stale scheduled tasks + recreate noodles
 rem    core-restart            Restart mssql rabbit redis mailpit
+rem    power                   Re-apply local settings to the Power web.configs
+rem                            power-local-setup.ps1 - needs Administrator
 rem    help                    Show this list
 rem ======================================================================
 
@@ -33,6 +35,8 @@ if "%ACTION%"=="" goto show_help
 if /i "%ACTION%"=="help" goto show_help
 if /i "%ACTION%"=="-h" goto show_help
 if /i "%ACTION%"=="--help" goto show_help
+rem Only edits files on the host - no Docker or .env.local password needed.
+if /i "%ACTION%"=="power" goto act_power
 
 where docker >nul 2>&1
 if errorlevel 1 (
@@ -196,6 +200,8 @@ if errorlevel 1 (
 )
 echo.
 echo Tip: if Environment / hostname changed, also run: ops-local.bat reset-tasks
+echo Tip: config-api and the Power sites cache configuration - run ops-local.bat config-restart
+echo      and restart the IIS sites wfe, portal, admin, cdn or recycle their app pools.
 goto success
 
 :act_reset_tasks
@@ -210,6 +216,18 @@ goto success
 echo Restarting core containers mssql rabbit redis mailpit ...
 %DC_POWER% restart mssql rabbit redis mailpit
 if errorlevel 1 (
+  call :fail_pause
+  exit /b 1
+)
+goto success
+
+:act_power
+echo.
+echo === local-infra ops: power ===
+echo.
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0power-local-setup.ps1"
+if errorlevel 1 (
+  echo ERROR: power-local-setup.ps1 failed - run ops-local.bat from an elevated prompt.
   call :fail_pause
   exit /b 1
 )
@@ -295,6 +313,7 @@ echo   overrides                Re-run 20-docker-overrides.sql
 echo   rename-refs              Re-run 30-rename-db-references.sql
 echo   reset-tasks              reset-scheduled-tasks.ps1
 echo   core-restart             Restart mssql rabbit redis mailpit
+echo   power                    Re-apply local settings to Power web.configs - elevated
 echo   help                     This list
 echo.
 echo Full from-scratch install:  setup-local.bat

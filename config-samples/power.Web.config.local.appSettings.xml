@@ -8,8 +8,10 @@
     power/EurofficeGroup.Web.Static/Web.config
 
   Do NOT hand-edit those Web.config files - that is what WebConfigPicker
-  (C:\workspace\webconfigpicker) is for. This file exists so you can see
-  which values the local variant is supposed to have.
+  (C:\workspace\webconfigpicker) and local-infra/power-local-setup.ps1
+  (or: ops-local.bat power) are for. The script writes every LOCAL value
+  below. This file exists so you can see which values the local variant is
+  supposed to have.
 
   Differences from the test6 config currently committed in the repo are
   marked with  <!== LOCAL ==>
@@ -19,7 +21,8 @@
        The committed value is eo0/eog because the repo ships the test6 config.
        INFRA_DEALER_CODE from local-infra/.env (default jst) - the main
        dealer (dev_uk_jst); dev_uk_idl is restored as well. Switch group by changing
-       DealerGroup here and the group switch in .env - see sql/test4/README.md. -->
+       DealerGroup here and the group switch in .env - see sql/test4/README.md.
+       FrontEnd and Portal only; Support and Static have no DealerId. -->
   <add key="DealerId" value="jst" />
 
   <!== LOCAL ==> Configuration API runs locally, not on vm-test-uks-06 -->
@@ -42,13 +45,16 @@
   <add key="ApplicationBaseUrl" value="http://wfe" />
 
   <!== LOCAL ==> Redis from docker-compose instead of redis-test-1/2.datacentre -->
-  <add key="Cache" value="localhost:6379,allowAdmin=true" />
-  <add key="Redis.ConnectionString" value="localhost:6379,allowAdmin=true" />
+  <add key="Cache" value="localhost:6379,allowAdmin=true,abortConnect=false" />
+  <add key="Redis.ConnectionString" value="localhost:6379,allowAdmin=true,abortConnect=false" />
 
-  <!-- Locally Service Bus is not used at all - RabbitMQ only -->
+  <!-- Locally Service Bus is not used at all - RabbitMQ only (guest/guest is the broker default) -->
   <add key="UseAzureServiceBus" value="false" />
-  <add key="Rabbit" value="host=localhost;username=guest;password=guest" />
+  <add key="Rabbit" value="host=localhost" />
 
   <add key="IdentityClientId" value="" />
-  <add key="Generic.ForceIntegratedSecurity" value="true" />
+
+  <!== LOCAL ==> true strips the SQL login and switches to Windows auth,
+       which the Linux SQL container rejects -->
+  <add key="Generic.ForceIntegratedSecurity" value="false" />
 </appSettings>

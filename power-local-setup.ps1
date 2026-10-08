@@ -1,7 +1,9 @@
 <#
 .SYNOPSIS
     Points the IIS-hosted Power sites at this machine's local infrastructure.
-    Run it AFTER WebConfigPicker's "Do the Magic!", every time.
+    Run it AFTER WebConfigPicker's "Do the Magic!", every time - or on its own
+    whenever the web.config files were reset (git checkout, a picker run for
+    another environment) and you just want the local settings back.
 
 .DESCRIPTION
     WHAT WEBCONFIGPICKER ALREADY DOES
@@ -9,13 +11,15 @@
     It copies each site's web.config from the chosen environment's server share
     and rewrites a handful of endpoints. With the local options ticked:
 
-        Cache / Redis.ConnectionString  localhost:6379
+        Cache / Redis.ConnectionString  localhost:6379,allowAdmin=true,abortConnect=false
         Rabbit                          host=localhost
         UseAzureServiceBus              false
         ConfigurationUrl                http://localhost:8080/configuration
 
     Those ports are exactly the ones docker-compose.yml publishes, so the tool
-    and this stack already agree. Nothing to change there.
+    and this stack already agree. This script writes the same values again
+    (a no-op after the picker), so a web.config that never went through the
+    picker - e.g. the one committed in the power repo - ends up local too.
 
     WHAT IT DOES NOT DO
 
@@ -36,6 +40,20 @@
        a Linux SQL Server container cannot accept. The site then fails to open
        any connection at all. This script sets it to false.
 
+    3. The dealer, group and environment are whatever the source config had -
+       the committed one says DealerId=POW, which is the group, not a dealer, so
+       the site asks for a dev_uk_POW database that does not exist. This script
+       takes them from .env / .env.local, the same values setup-local.bat
+       restored the databases with:
+
+           Environment   <- INFRA_ENVIRONMENT   (all sites)
+           DealerGroup   <- INFRA_DEALER_GROUP  (all sites)
+           DealerId      <- INFRA_DEALER_CODE   (wfe and portal only)
+
+       DealerId goes only to wfe and portal: their ContextsInstaller uses it as
+       the default dealer database. admin and cdn run without one today, and
+       giving them one would change which database they open.
+
     Run as administrator: reading site paths out of IIS needs it, which is why
     WebConfigPicker asks for the same.
 
@@ -44,6 +62,9 @@
 
 .EXAMPLE
     .\power-local-setup.ps1 -WhatIf
+
+.EXAMPLE
+    .\power-local-setup.ps1 -DealerCode idl
 #>
 
 [CmdletBinding(SupportsShouldProcess)]
@@ -62,8 +83,27 @@ param(
     # Leave the sites calling TEST4's APIs over the VPN. Use this if the "apis"
     # compose profile is not running - a site pointed at a dead local port fails
     # harder than one that is merely slow.
-    [switch] $KeepRemoteApis
+    [switch] $KeepRemoteApis,
+
+    # Default: INFRA_DEALER_CODE / INFRA_DEALER_GROUP / INFRA_ENVIRONMENT from
+    # .env, overridden by .env.local - the values the databases were restored with.
+    [string] $DealerCode,
+    [string] $DealerGroup,
+    [string] $Environment
 )
+
+# Sites whose ContextsInstaller reads DealerId as the default dealer database.
+$DealerSites = @('wfe', 'portal')
+
+# What WebConfigPicker writes with "Use local cache" / "Use local RabbitMQ"
+# (MainWindow.xaml.cs, OverrideConfigFile). Keep the strings identical, so that
+# running this after the picker changes nothing.
+$LocalEndpoints = [ordered] @{
+    'Cache'                  = 'localhost:6379,allowAdmin=true,abortConnect=false'
+    'Redis.ConnectionString' = 'localhost:6379,allowAdmin=true,abortConnect=false'
+    'UseAzureServiceBus'     = 'false'
+    'Rabbit'                 = 'host=localhost'
+}
 
 # The satellite APIs, at the ports docker-compose.yml publishes for them.
 #
@@ -86,7 +126,42 @@ $LocalApis = [ordered] @{
 
 $ErrorActionPreference = 'Stop'
 
-$id = [Security.Principal.WindowsIdentity]::GetCurrent()
+# Same lookup as :read_env in setup-local.bat / ops-local.bat: KEY=value at the
+# start of a line, .env.local wins over .env. Only reads the keys asked for.
+function Read-EnvValue {
+    param([string] $Key)
+
+    $value = $null
+    foreach ($file in @('.env', '.env.local')) {
+        $path = Join-Path $PSScriptRoot $file
+        if (-not (Test-Path $path)) { continue }
+        foreach ($line in Get-Content -LiteralPath $path) {
+            if ($line.StartsWith("$Key=")) { $value = $line.Substring($Key.Length + 1).Trim() }
+        }
+    }
+    return $value
+}
+
+if (-not $DealerCode)  { $DealerCode  = Read-EnvValue 'INFRA_DEALER_CODE' }
+if (-not $DealerGroup) { $DealerGroup = Read-EnvValue 'INFRA_DEALER_GROUP' }
+if (-not $Environment) { $Environment = Read-EnvValue 'INFRA_ENVIRONMENT' }
+# The defaults setup-local.bat and .env ship with.
+if (-not $DealerCode)  { $DealerCode  = 'jst' }
+if (-not $DealerGroup) { $DealerGroup = 'pow' }
+if (-not $Environment) { $Environment = 'local' }
+
+# WebConfigPicker lower-cases DealerId; the dealer database is dev_uk_<code>.
+$DealerCode = $DealerCode.ToLowerInvariant()
+
+foreach ($pair in @(@('DealerCode', $DealerCode), @('DealerGroup', $DealerGroup), @('Environment', $Environment))) {
+    if ($pair[1] -notmatch '^[A-Za-z0-9_]+$') {
+        throw "$($pair[0]) '$($pair[1])' must be letters, digits or _ only - check INFRA_* in .env / .env.local."
+    }
+}
+
+Write-Host "Dealer $DealerCode, group $DealerGroup, environment $Environment"
+
+$id =[Security.Principal.WindowsIdentity]::GetCurrent()
 if (-not (New-Object Security.Principal.WindowsPrincipal($id)).IsInRole(
         [Security.Principal.WindowsBuiltInRole]::Administrator)) {
     throw 'Run this in an elevated PowerShell (Run as administrator).'
@@ -104,7 +179,8 @@ function Set-AppSetting {
 
     $node = $appSettings.add | Where-Object { $_.key -eq $Key }
     if ($node) {
-        if ($node.value -eq $Value) { return $false }
+        # Case-sensitive: DealerGroup POW -> pow must count as a change.
+        if ($node.value -ceq $Value) { return $false }
         $node.value = $Value
     }
     else {
@@ -161,6 +237,22 @@ foreach ($siteName in $Sites) {
         }
     }
 
+    # Redis and RabbitMQ from docker-compose.yml, as the picker's local options.
+    foreach ($key in $LocalEndpoints.Keys) {
+        if (Set-AppSetting -Xml $xml -Key $key -Value $LocalEndpoints[$key]) {
+            $changes += "  {0,-28} = {1}" -f $key, $LocalEndpoints[$key]
+        }
+    }
+
+    # Which databases the site opens: dev_uk_supportcentre plus dev_uk_<DealerId>.
+    $dealerSettings = [ordered] @{ 'Environment' = $Environment; 'DealerGroup' = $DealerGroup }
+    if ($DealerSites -contains $siteName) { $dealerSettings['DealerId'] = $DealerCode }
+    foreach ($key in $dealerSettings.Keys) {
+        if (Set-AppSetting -Xml $xml -Key $key -Value $dealerSettings[$key]) {
+            $changes += "  {0,-28} = {1}" -f $key, $dealerSettings[$key]
+        }
+    }
+
     if ($changes.Count -eq 0) {
         Write-Host '  already correct'
         continue
@@ -176,6 +268,9 @@ foreach ($siteName in $Sites) {
 }
 
 Write-Host ''
+$dbPrefix = Read-EnvValue 'INFRA_DB_PREFIX'
+if (-not $dbPrefix) { $dbPrefix = 'dev_uk' }
+Write-Host "Dealer database expected:  ${dbPrefix}_$DealerCode"
 Write-Host 'Check the sites resolve:   ping -n 1 mssql'
 Write-Host 'If that fails, run:        .\hosts-setup.ps1'
 Write-Host 'Rollback a site:           copy web.config.before-local over web.config'

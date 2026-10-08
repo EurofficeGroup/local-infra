@@ -335,8 +335,7 @@ if "%DO_POWER%"=="1" (
 ) else (
   echo   Manual next steps:
   echo     1. WebConfigPicker - select local Configuration API / Rabbit / Redis
-  echo     2. Elevated: .\power-local-setup.ps1
-  echo     3. Confirm Environment=local, DealerGroup matches .env, DealerId = INFRA_DEALER_CODE %INFRA_DEALER_CODE%
+  echo     2. Elevated: .\power-local-setup.ps1 - also sets Environment, DealerGroup and DealerId %INFRA_DEALER_CODE% from .env
 )
 
 echo.
