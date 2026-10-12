@@ -23,8 +23,14 @@
     MainWindow.xaml.cs), and the compose files use the same paths as build
     contexts. Keep them as written below.
 
-    Elasticsearch's API is deliberately absent: the index is too large to host
-    locally, so SearchApiServiceUrl stays pointed at TEST4.
+    With -Search it also handles the two repositories of the optional 'search'
+    profile (ops-local.bat search-on): ../search (the search API) and
+    ../integrations (the indexer Noodles.SearchEs). Without -Search they are
+    neither cloned nor pulled, so a plain setup does not need them.
+
+    Clones use core.longpaths=true: eurofficegroup.integrations has deep paths
+    that pass 260 characters once the workspace folder is itself long, and the
+    checkout then comes out incomplete on Windows.
 
     No credentials are set up here. If git asks for a password, sign in to
     GitHub for the EurofficeGroup org first - these are private repositories.
@@ -36,6 +42,9 @@
     .\clone-apis.ps1 -NoPull      # only clone what is missing
 
 .EXAMPLE
+    .\clone-apis.ps1 -Search     # also ../search and ../integrations
+
+.EXAMPLE
     .\clone-apis.ps1 -WhatIf
 #>
 
@@ -45,7 +54,10 @@ param(
     [string] $Workspace,
 
     # Clone missing repositories only; do not pull existing ones.
-    [switch] $NoPull
+    [switch] $NoPull,
+
+    # Also the repositories of the 'search' profile.
+    [switch] $Search
 )
 
 $ErrorActionPreference = 'Stop'
@@ -68,6 +80,11 @@ $Repos = [ordered] @{
     'api.payments'      = 'eurofficegroup.api.payments'
 }
 
+if ($Search) {
+    $Repos['search']       = 'eurofficegroup.search'         # search-api
+    $Repos['integrations'] = 'eurofficegroup.integrations'   # noodles-searches
+}
+
 $warnings = @()
 
 foreach ($folder in $Repos.Keys) {
@@ -79,7 +96,7 @@ foreach ($folder in $Repos.Keys) {
         if ($PSCmdlet.ShouldProcess($target, "git clone $url")) {
             Write-Host ''
             Write-Host "$folder  <-  $repo  (clone)"
-            git clone $url $target
+            git clone -c core.longpaths=true $url $target
             if ($LASTEXITCODE -ne 0) {
                 throw "Clone of $repo failed. Check GitHub access and the repository name - the org renames these occasionally."
             }

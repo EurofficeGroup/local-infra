@@ -114,7 +114,9 @@ $LocalEndpoints = [ordered] @{
 # fallback compiled into PaymentsApiInstaller), and the picker has to be re-run
 # in full to change one of them.
 #
-# SearchApiServiceUrl is absent on purpose: Elasticsearch stays on TEST4.
+# SearchApiServiceUrl is absent on purpose: Power reads it from cfg_Configurations,
+# which points at TEST4 by default and at the search-api container after
+# ops-local.bat search-on. A web.config value here would override both.
 $LocalApis = [ordered] @{
     'PricingApiServiceUrl'        = 'http://localhost:9000/pricing'
     'TaxApiServiceUrl'            = 'http://localhost:9005/tax'

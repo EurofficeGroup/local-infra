@@ -17,6 +17,11 @@
 #     ENTRY    EurofficeGroup.Api.Tax.dll
 #     PORT     9005
 #
+# and, only where the repo differs, SOURCE_DIR (default src): the folder that
+# holds the projects. The search API (repo eurofficegroup.search) keeps its
+# projects at the repo root, so it passes SOURCE_DIR=. and a PROJECT without
+# the src/ prefix.
+#
 # The port key itself (TaxApiPort, PricingApiPort, ...) is a plain environment
 # variable set by compose, since its NAME differs per service and a Dockerfile
 # cannot set a variable whose name is an argument.
@@ -32,7 +37,16 @@ WORKDIR /src
 # These repos keep NuGet.Config in .nuget/, which NuGet's parent-directory
 # discovery does not look inside. Copy it where restore will find it.
 COPY .nuget/NuGet.Config ./NuGet.Config
-COPY src/ src/
+# The internal feed must be a package SOURCE. Most repos list it so; the search
+# repo has it under <packageRestore> by mistake and builds on developer machines
+# only because their user-level NuGet.Config adds the feed. The container has no
+# such file, so add the source when it is missing (a no-op for the other APIs).
+ARG EO_FEED=http://build.euroffice.co.uk/guestAuth/app/nuget/feed/Power/default/v3/index.json
+RUN if ! dotnet nuget list source --configfile NuGet.Config | grep -q "$EO_FEED"; then \
+        dotnet nuget add source "$EO_FEED" --name eo-local-infra --configfile NuGet.Config; \
+    fi
+ARG SOURCE_DIR=src
+COPY ${SOURCE_DIR}/ ${SOURCE_DIR}/
 
 ARG PROJECT
 ARG BUILD_CONFIG=Release

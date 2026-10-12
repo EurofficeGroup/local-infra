@@ -1,0 +1,9 @@
+# Keeps bin/obj out of the build context - without this the context is
+# gigabytes of previously-built output and the build crawls.
+**/bin/
+**/obj/
+**/.vs/
+**/.git/
+**/.idea/
+**/TestResults/
+**/*.user

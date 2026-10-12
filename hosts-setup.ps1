@@ -81,6 +81,7 @@ $entries = @(
     @{ Name = 'mailpit';    Why = 'Mailpit SMTP container' }
     @{ Name = 'config-api'; Why = 'Configuration API container' }
     @{ Name = 'elastic';    Why = 'Elasticsearch container (search profile)' }
+    @{ Name = 'search-api'; Why = 'Search API container (search profile) - SearchApiServiceUrl after ops-local.bat search-on' }
 )
 
 $id = [Security.Principal.WindowsIdentity]::GetCurrent()

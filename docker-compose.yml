@@ -13,7 +13,8 @@
 # api-power (config-api), then noodles - setup-local.bat does it for you.
 #
 #   docker compose up -d                      # core: mssql, rabbit, redis, mailpit
-#   docker compose --profile search up -d     # + Elasticsearch/Kibana
+#   docker compose --profile search up -d     # + Elasticsearch/Kibana only;
+#                                             #   ops-local.bat search-on for the whole search stack
 #   docker compose -f docker-compose.api.yml up -d config-api
 #   docker compose -f docker-compose.api.yml up -d                  # config-api + APIs
 #   docker compose -f docker-compose.noodles.yml up -d [noodles-sales ...]
@@ -33,7 +34,7 @@ volumes:
   rabbit-data:
   redis-data:
   mssql-data:
-  elastic-data:
+  elastic-data-8:
 
 services:
 
@@ -169,22 +170,42 @@ services:
 
   # ==================================================================
   # Profile: search - Elasticsearch + Kibana
-  # Version 7.9.2 - same as power/Docker-builds/Elastic/docker-compose.yml
+  #
+  # Version = TEST4's cluster (elastic-test-lb answers 8.15.0), not the 7.9.2
+  # in power/Docker-builds/Elastic: the indexer and the search API are tested
+  # against what TEST4 runs. ES 8 refuses to open data written by anything
+  # older than 7.17, hence a fresh volume name instead of the old elastic-data.
+  #
+  # Started by  ops-local.bat search-on  together with search-api
+  # (docker-compose.api.yml) and noodles-searches (docker-compose.noodles.yml).
+  # Plain `docker compose --profile search up -d` starts only these two.
+  #
+  # SYNONYMS. Every product index has a synonym_graph filter that reads a file
+  # from the node's config folder (cfg ElasticSearch.SynonymFilePathOnNodes).
+  # On TEST4 noodles-transport puts that file on each node over SFTP; here the
+  # transport row is switched to a plain file write into ./files/elastic
+  # (sql/init/40-search-local.sql), and that folder is mounted below as
+  # config/eo. search-local.ps1 creates an empty synonyms.txt first, because
+  # an index cannot be created while the file is missing.
   # ==================================================================
   elastic:
     profiles: ["search", "all"]
     container_name: elastic
-    image: docker.elastic.co/elasticsearch/elasticsearch:7.9.2
+    image: docker.elastic.co/elasticsearch/elasticsearch:${ELASTIC_VERSION}
     restart: unless-stopped
     environment:
       - discovery.type=single-node
       - bootstrap.memory_lock=false
       - "ES_JAVA_OPTS=-Xms${ELASTIC_HEAP} -Xmx${ELASTIC_HEAP}"
       - xpack.security.enabled=false
+      # Neither is used here; both cost memory or reach out to the internet.
+      - xpack.ml.enabled=false
+      - ingest.geoip.downloader.enabled=false
     ports:
       - "${ELASTIC_PORT}:9200"
     volumes:
-      - elastic-data:/usr/share/elasticsearch/data
+      - elastic-data-8:/usr/share/elasticsearch/data
+      - ./files/elastic:/usr/share/elasticsearch/config/eo
     networks: [hostnet]
     mem_limit: ${ELASTIC_MEM}
     mem_reservation: ${ELASTIC_MEM_RES}
@@ -200,7 +221,7 @@ services:
   kibana:
     profiles: ["search", "all"]
     container_name: kibana
-    image: docker.elastic.co/kibana/kibana:7.9.2
+    image: docker.elastic.co/kibana/kibana:${ELASTIC_VERSION}
     restart: unless-stopped
     environment:
       - ELASTICSEARCH_HOSTS=http://elastic:9200

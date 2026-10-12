@@ -12,6 +12,7 @@ rem    setup-local.bat
 rem    setup-local.bat --wipe
 rem    setup-local.bat --skip-hosts --skip-build
 rem    setup-local.bat --power
+rem    setup-local.bat --search      also the local search stack (ops-local.bat search-on)
 rem
 rem  On failure the script prints the concrete cause, how to fix it, recent
 rem  container logs where relevant, and the right command to retry with.
@@ -27,6 +28,7 @@ set "SKIP_NOODLES=0"
 set "DO_APIS=0"
 set "SKIP_PULL=0"
 set "DO_POWER=0"
+set "DO_SEARCH=0"
 
 rem Error report fields, read by :fail (see Helpers).
 set "ORIG_ARGS=%*"
@@ -47,8 +49,9 @@ if /i "%~1"=="--skip-noodles" set "SKIP_NOODLES=1" & shift & goto parse_args
 if /i "%~1"=="--apis"         set "DO_APIS=1"      & shift & goto parse_args
 if /i "%~1"=="--skip-pull"    set "SKIP_PULL=1"    & shift & goto parse_args
 if /i "%~1"=="--power"        set "DO_POWER=1"     & shift & goto parse_args
+if /i "%~1"=="--search"       set "DO_SEARCH=1"    & shift & goto parse_args
 set "ERR_MSG=Unknown argument: %~1"
-set "ERR_HINT=Usage: setup-local.bat [--wipe] [--skip-hosts] [--skip-restore] [--skip-build] [--skip-noodles] [--skip-pull] [--apis] [--power]"
+set "ERR_HINT=Usage: setup-local.bat [--wipe] [--skip-hosts] [--skip-restore] [--skip-build] [--skip-noodles] [--skip-pull] [--apis] [--power] [--search]"
 set "ORIG_ARGS="
 goto fail
 :args_done
@@ -133,8 +136,8 @@ if errorlevel 1 (
 rem ---------- 0. wipe to zero optional / on every failed retry ----------
 if "%DO_WIPE%"=="1" (
   echo [0/8] Wiping stack and volumes to zero ...
-  %DC_NOODLES% --profile build down -v --remove-orphans
-  %DC_API% down -v --remove-orphans
+  %DC_NOODLES% --profile build --profile search down -v --remove-orphans
+  %DC_API% --profile search down -v --remove-orphans
   %DC_POWER% --profile search down -v --remove-orphans
   if errorlevel 1 (
     set "ERR_MSG=[0/8] Wipe failed: docker compose down -v - see docker output above."
@@ -323,6 +326,21 @@ if "%SKIP_NOODLES%"=="1" (
   )
 )
 
+rem ---------- 7b. local search optional ----------
+rem After the restore and noodles: 40-search-local.sql needs the restored support
+rem centre, and the new image builds need the same VPN as step 5. A restore
+rem brings TEST4's search values back, so this has to run after every one.
+if "%DO_SEARCH%"=="1" (
+  echo [7b] Local search stack - search-local.ps1 -Mode On ...
+  powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0search-local.ps1" -Mode On
+  if errorlevel 1 (
+    set "ERR_MSG=[7b] search-local.ps1 -Mode On failed - the reason is printed above."
+    set "ERR_HINT=Fix it, then run only this step:  ops-local.bat search-on"
+    set "ERR_HINT2=Build errors = VPN off, or ../search / ../integrations on a broken branch."
+    goto fail
+  )
+)
+
 rem ---------- 8. Power optional ----------
 echo [8/8] Power sites
 if "%DO_POWER%"=="1" (
@@ -437,17 +455,21 @@ rem Pipes a SQL script into sqlcmd in the mssql container, substituting the
 rem database switch from .env into its DECLARE lines first:
 rem   @SourcePrefix <- INFRA_BACKUP_PREFIX   @TargetPrefix <- INFRA_DB_PREFIX
 rem   @DealerCode   <- INFRA_DEALER_CODE     @WhatIf 1 -> 0 when arg 3 is apply
+rem   @HostFileRoot <- this folder's files\ (Windows path for Power, 20-docker-overrides.sql)
 rem   arg 1 = script path on the host, arg 2 = database ("" = master)
+set "INFRA_HOST_FILE_ROOT=%~dp0files\"
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "$ErrorActionPreference='Stop';" ^
   "$db = '%~2'; $dbArgs = @(); if ($db) { $dbArgs = @('-d', $db) };" ^
   "$set = { param($line, $name, $value) $line -replace ('^(DECLARE @' + $name + '\s.*?=\s*)N''[^'']*'''), ('${1}N''' + $value + '''') };" ^
+  "$q = [string][char]39; $hostFileRoot = $env:INFRA_HOST_FILE_ROOT.Replace($q, $q + $q);" ^
   "Get-Content -LiteralPath '%~1' | ForEach-Object {" ^
   "  $l = $_;" ^
   "  if ('%~3' -eq 'apply') { $l = $l -replace 'DECLARE @WhatIf\s+BIT = 1','DECLARE @WhatIf    BIT = 0' };" ^
   "  $l = & $set $l 'SourcePrefix' $env:INFRA_BACKUP_PREFIX;" ^
   "  $l = & $set $l 'TargetPrefix' $env:INFRA_DB_PREFIX;" ^
-  "  & $set $l 'DealerCode' $env:INFRA_DEALER_CODE" ^
+  "  $l = & $set $l 'DealerCode' $env:INFRA_DEALER_CODE;" ^
+  "  & $set $l 'HostFileRoot' $hostFileRoot" ^
   "} | docker exec -i mssql %SQLCMD% -S localhost -U sa -P $env:MSSQL_SA_PASSWORD -C @dbArgs;" ^
   "exit $LASTEXITCODE"
 exit /b %ERRORLEVEL%

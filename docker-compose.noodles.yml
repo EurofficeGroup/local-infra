@@ -426,3 +426,55 @@ services:
     mem_limit: ${NOODLES_MEM}
     mem_reservation: ${NOODLES_MEM_RES}
     cpus: ${NOODLES_CPUS}
+
+
+  # ==================================================================
+  # Profile: search - the Elasticsearch indexer (Noodles.SearchEs).
+  #
+  # It is not in the noodles repo but in eurofficegroup.integrations (folder
+  # ../integrations), so it has its own image, built here rather than by
+  # noodles-build. A plain `up` skips it; ops-local.bat search-on starts it
+  # after the database has been switched to the local search stack.
+  #
+  # What it does: a full rebuild of a dealer's product index from the dealer
+  # database (Support Centre > Dev > Search Engine > Start Product Index
+  # Export), then keeps it current from events such as
+  # ItemDetailChangedDealerEvent - the custom list uploader publishes that one.
+  #
+  # SAFETY. A rebuild creates a new index, moves the alias and DELETES the old
+  # index. Pointed at TEST4's shared cluster, one click here would replace
+  # TEST4's index with this machine's data. The configuration client lets the
+  # process environment win over config-api, so the three keys below pin the
+  # container to the local node no matter what cfg_Configurations says. The
+  # indexer reads ElasticSearchUpdateConnectionString first and only falls back
+  # to ElasticSearchConnectionString, so both are set. Do not remove them.
+  # ==================================================================
+  noodles-searches:
+    profiles: ["search", "all"]
+    container_name: noodles-searches
+    hostname: ${LOCAL_HOSTNAME}
+    image: ${NOODLES_SEARCHES_IMAGE}
+    build:
+      context: ../integrations
+      dockerfile: ../local-infra/docker/integrations.Dockerfile
+      args:
+        SERVICES: Noodles.SearchEs
+    restart: unless-stopped
+    environment:
+      NOODLES_SERVICE: Noodles.SearchEs
+      ServiceName: noodles.searches
+      DealerGroup: ${INFRA_DEALER_GROUP}
+      Environment: ${INFRA_ENVIRONMENT}
+      ConfigurationUrl: ${CONFIGURATION_URL}
+      ElasticSearchConnectionString: http://elastic:9200
+      ElasticSearchUpdateConnectionString: http://elastic:9200
+      # Relative to the node's config folder; ./files/elastic is mounted there
+      # as config/eo (docker-compose.yml, service elastic).
+      ElasticSearch.SynonymFilePathOnNodes: eo/synonyms.txt
+    volumes:
+      # Data bus files (the synonym file travels to noodles-transport this way).
+      - ./files:/files
+    networks: [hostnet]
+    mem_limit: ${NOODLES_SEARCHES_MEM}
+    mem_reservation: ${NOODLES_MEM_RES}
+    cpus: ${NOODLES_CPUS}

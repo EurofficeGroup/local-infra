@@ -21,6 +21,12 @@ rem    overrides               Re-run 20-docker-overrides.sql on support-centre
 rem    rename-refs             Re-run 30-rename-db-references.sql
 rem    reset-tasks             Clear stale scheduled tasks + recreate noodles
 rem    core-restart            Restart mssql rabbit redis mailpit
+rem    search-on               Local search stack: elastic + search-api + noodles-searches,
+rem                            configuration switched to them (search-local.ps1 -Mode On)
+rem    search-off              Back to TEST4 search; stops the search containers
+rem    search-rebuild          search-on, rebuilding the search-api / noodles-searches images
+rem    search-status           Search containers, configuration values and indices
+rem    search-reset            Unstick the indexer: empty its queue, clear its saga state
 rem    power                   Re-apply local settings to the Power web.configs
 rem                            power-local-setup.ps1 - needs Administrator
 rem    help                    Show this list
@@ -102,6 +108,11 @@ if /i "%ACTION%"=="overrides"       goto act_overrides
 if /i "%ACTION%"=="rename-refs"     goto act_rename_refs
 if /i "%ACTION%"=="reset-tasks"     goto act_reset_tasks
 if /i "%ACTION%"=="core-restart"    goto act_core_restart
+if /i "%ACTION%"=="search-on"       goto act_search
+if /i "%ACTION%"=="search-off"      goto act_search
+if /i "%ACTION%"=="search-rebuild"  goto act_search
+if /i "%ACTION%"=="search-status"   goto act_search
+if /i "%ACTION%"=="search-reset"    goto act_search
 
 echo Unknown action: %ACTION%
 echo.
@@ -221,6 +232,22 @@ if errorlevel 1 (
 )
 goto success
 
+:act_search
+rem The order matters (database before indexer, config-api after the database),
+rem so all four live in one script instead of being spread over labels here.
+set "SEARCH_MODE=Status"
+if /i "%ACTION%"=="search-on"      set "SEARCH_MODE=On"
+if /i "%ACTION%"=="search-off"     set "SEARCH_MODE=Off"
+if /i "%ACTION%"=="search-rebuild" set "SEARCH_MODE=Rebuild"
+if /i "%ACTION%"=="search-reset"   set "SEARCH_MODE=Reset"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0search-local.ps1" -Mode %SEARCH_MODE%
+if errorlevel 1 (
+  echo ERROR: search-local.ps1 -Mode %SEARCH_MODE% failed - the reason is printed above.
+  call :fail_pause
+  exit /b 1
+)
+goto success
+
 :act_power
 echo.
 echo === local-infra ops: power ===
@@ -262,17 +289,21 @@ rem Pipes a SQL script into sqlcmd in the mssql container, substituting the
 rem database switch from .env into its DECLARE lines first:
 rem   @SourcePrefix <- INFRA_BACKUP_PREFIX   @TargetPrefix <- INFRA_DB_PREFIX
 rem   @DealerCode   <- INFRA_DEALER_CODE     @WhatIf 1 -> 0 when arg 3 is apply
+rem   @HostFileRoot <- this folder's files\ (Windows path for Power, 20-docker-overrides.sql)
 rem   arg 1 = script path on the host, arg 2 = database ("" = master)
+set "INFRA_HOST_FILE_ROOT=%~dp0files\"
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "$ErrorActionPreference='Stop';" ^
   "$db = '%~2'; $dbArgs = @(); if ($db) { $dbArgs = @('-d', $db) };" ^
   "$set = { param($line, $name, $value) $line -replace ('^(DECLARE @' + $name + '\s.*?=\s*)N''[^'']*'''), ('${1}N''' + $value + '''') };" ^
+  "$q = [string][char]39; $hostFileRoot = $env:INFRA_HOST_FILE_ROOT.Replace($q, $q + $q);" ^
   "Get-Content -LiteralPath '%~1' | ForEach-Object {" ^
   "  $l = $_;" ^
   "  if ('%~3' -eq 'apply') { $l = $l -replace 'DECLARE @WhatIf\s+BIT = 1','DECLARE @WhatIf    BIT = 0' };" ^
   "  $l = & $set $l 'SourcePrefix' $env:INFRA_BACKUP_PREFIX;" ^
   "  $l = & $set $l 'TargetPrefix' $env:INFRA_DB_PREFIX;" ^
-  "  & $set $l 'DealerCode' $env:INFRA_DEALER_CODE" ^
+  "  $l = & $set $l 'DealerCode' $env:INFRA_DEALER_CODE;" ^
+  "  & $set $l 'HostFileRoot' $hostFileRoot" ^
   "} | docker exec -i mssql %SQLCMD% -S localhost -U sa -P $env:MSSQL_SA_PASSWORD -C @dbArgs;" ^
   "exit $LASTEXITCODE"
 exit /b %ERRORLEVEL%
@@ -313,6 +344,11 @@ echo   overrides                Re-run 20-docker-overrides.sql
 echo   rename-refs              Re-run 30-rename-db-references.sql
 echo   reset-tasks              reset-scheduled-tasks.ps1
 echo   core-restart             Restart mssql rabbit redis mailpit
+echo   search-on                Local Elasticsearch + search API + indexer; config switched to them
+echo   search-off               Back to TEST4 search, search containers stopped
+echo   search-rebuild           search-on with a rebuild of the search-api / noodles-searches images
+echo   search-status            Search containers, configuration and indices
+echo   search-reset             Unstick the indexer after an aborted rebuild or a restore
 echo   power                    Re-apply local settings to Power web.configs - elevated
 echo   help                     This list
 echo.

@@ -45,11 +45,15 @@ DECLARE @SmtpPort  NVARCHAR(10)  = N'1025';
 -- Linux containers, and C:\... means nothing to them. Compose mounts the host
 -- folder ./files at /files for every noodles service.
 --
--- Power under IIS on this machine would need the Windows path instead, and one
--- row cannot be both. When that day comes, add a second row with cfg_Service
--- set to the Power service name - the configuration resolves the more specific
--- row first, which is what that column is for.
+-- Power under IIS on this machine needs the Windows path of the same folder.
+-- Section 4 below copies every /files/... value into rows with cfg_Service set
+-- to each Power service (the configuration resolves the more specific row
+-- first) with @HostFileRoot instead. Both sides then share one folder, which the
+-- NServiceBus data bus (file uploads, PDFs) needs.
 DECLARE @FileRoot  NVARCHAR(200) = N'/files/';
+-- Host path of ./files, with a trailing backslash. setup-local.bat / ops-local.bat
+-- substitute it from their own folder. Empty = section 4 is skipped.
+DECLARE @HostFileRoot NVARCHAR(400) = N'';
 DECLARE @WhatIf    BIT = 0;   -- 1 = show the before/after, change nothing
 -- Catalog prefix: <SourcePrefix>_ in the restored configuration becomes
 -- <TargetPrefix>_. Equal values = no rename.
@@ -295,20 +299,23 @@ INSERT INTO #flat (name, value) VALUES
     -- TEST4 restores leave FilterEmails=true with a whitelist that drops almost
     -- every address (Leave, never hits SMTP). Mailpit is already the boundary
     -- locally, so turn the filter off.
-    (N'FilterEmails',            N'false');
+    (N'FilterEmails',            N'false'),
+
+    -- Power on Windows writes data bus keys as 'yyyy-MM-dd_HH\guid'; noodles on
+    -- Linux reads the backslash as part of the file name, so every PSP upload
+    -- failed with DirectoryNotFoundException. Noodles (DataBusKeySeparatorBehaviour)
+    -- swaps it for '/' when this is on. Off by default everywhere else.
+    (N'NServiceBusDataBusNormalizeKeys', N'true');
 
 -- Keys deliberately NOT touched:
---   ElasticSearchConnectionString - left pointing at elastic-test-lb.euroffice.co.uk.
---                          An earlier version of this comment claimed no such key existed
---                          and that search here is only Endeca. It does exist.
---                          Not repointed on purpose: the 'search' profile is not part of
---                          a plain 'compose up', so aiming this at the elastic container
---                          would break anyone who does not start that profile.
---                          To use the local one:
---                             UPDATE dbo.cfg_Configurations
---                                SET cfg_Value = N'http://elastic:9200'
---                              WHERE cfg_Name = N'ElasticSearchConnectionString';
---                          then  docker compose --profile search up -d
+--   ElasticSearchConnectionString, SearchApiServiceUrl, the synonym transport row
+--                        - left on TEST4's search here. Not repointed on purpose: the
+--                          'search' profile is not part of a plain 'compose up', so aiming
+--                          these at local containers would break search for anyone who
+--                          does not start that profile.
+--                          To switch to the local search stack:  ops-local.bat search-on
+--                          (sql/init/40-search-local.sql + the containers, in that order;
+--                          search-off / 41-search-remote.sql undoes it).
 --   Ssrs.ServerUrl       - a TEST4 configuration pointing at the live reporting server.
 --                          Nothing local reads it yet; if a service ever renders a
 --                          report, it will reach that server.
@@ -331,11 +338,60 @@ SELECT cfg_Name, cfg_Value AS old_value,
  WHERE cfg_Value LIKE N'\\%';
 
 -- ---------------------------------------------------------------------
+-- 4. The same file locations as Windows paths, for Power only
+--
+-- Power reads its configuration under these service names (UseApiConfiguration
+-- in each site's IoC setup). Noodles services use their own names, so they keep
+-- the /files/... container path.
+-- The Support site defaults to 'support' but its Web.config sets
+-- ServiceName=suppliers (the same code runs the suppliers portal), and that
+-- name is what it asks the configuration for - so both are listed.
+-- ---------------------------------------------------------------------
+DECLARE @PowerServices TABLE (svc NVARCHAR(50) PRIMARY KEY);
+INSERT INTO @PowerServices (svc)
+VALUES (N'portal'), (N'frontend'), (N'support'), (N'suppliers'), (N'static'), (N'datamanagement'), (N'genericprocess');
+
+IF OBJECT_ID('tempdb..#hostfiles') IS NOT NULL DROP TABLE #hostfiles;
+
+CREATE TABLE #hostfiles
+(
+    cfg_Dealer NVARCHAR(50)  COLLATE DATABASE_DEFAULT NULL,
+    cfg_Service NVARCHAR(50) COLLATE DATABASE_DEFAULT NOT NULL,
+    cfg_Name   NVARCHAR(200) COLLATE DATABASE_DEFAULT NOT NULL,
+    new_value  NVARCHAR(MAX) NOT NULL
+);
+
+-- Built from the rows as they will be after section 3: values still on a UNC
+-- share are redirected below, so take both forms.
+IF @HostFileRoot <> N''
+    INSERT INTO #hostfiles (cfg_Dealer, cfg_Service, cfg_Name, new_value)
+    SELECT c.cfg_Dealer, p.svc, c.cfg_Name,
+           @HostFileRoot + REPLACE(
+               CASE WHEN c.cfg_Value LIKE N'\\%'
+                    THEN RIGHT(c.cfg_Value, CHARINDEX(N'\', REVERSE(c.cfg_Value) + N'\') - 1)
+                    ELSE SUBSTRING(c.cfg_Value, LEN(@FileRoot) + 1, 4000) END,
+               N'/', N'\')
+      FROM dbo.cfg_Configurations c
+     CROSS JOIN @PowerServices p
+     WHERE c.cfg_Service IS NULL
+       AND (c.cfg_Value LIKE N'\\%' OR c.cfg_Value LIKE @FileRoot + N'%');
+ELSE
+    PRINT N'@HostFileRoot is empty: Power keeps the /files/ paths (section 4 skipped).';
+
+SELECT h.cfg_Dealer, h.cfg_Service, h.cfg_Name,
+       (SELECT TOP 1 c.cfg_Value FROM dbo.cfg_Configurations c
+         WHERE c.cfg_Name = h.cfg_Name AND c.cfg_Service = h.cfg_Service
+           AND ISNULL(c.cfg_Dealer, N'') = ISNULL(h.cfg_Dealer, N'')) AS old_value,
+       h.new_value
+  FROM #hostfiles h
+ ORDER BY h.cfg_Name, h.cfg_Service, h.cfg_Dealer;
+
+-- ---------------------------------------------------------------------
 -- Apply
 -- ---------------------------------------------------------------------
 IF @WhatIf = 1
 BEGIN
-    RAISERROR (N'@WhatIf was 1: nothing changed. Review the four result sets above, then set @WhatIf = 0.', 10, 1);
+    RAISERROR (N'@WhatIf was 1: nothing changed. Review the five result sets above, then set @WhatIf = 0.', 10, 1);
     RETURN;
 END
 
@@ -375,6 +431,24 @@ UPDATE dbo.cfg_Configurations
  WHERE cfg_Value LIKE N'\\%';
 
 PRINT N'UNC paths redirected: ' + CAST(@@ROWCOUNT AS NVARCHAR(10));
+
+UPDATE c
+   SET c.cfg_Value = h.new_value
+  FROM dbo.cfg_Configurations c
+  JOIN #hostfiles h
+    ON h.cfg_Name = c.cfg_Name AND h.cfg_Service = c.cfg_Service
+   AND ISNULL(h.cfg_Dealer, N'') = ISNULL(c.cfg_Dealer, N'');
+
+PRINT N'Power file paths updated: ' + CAST(@@ROWCOUNT AS NVARCHAR(10));
+
+INSERT INTO dbo.cfg_Configurations (cfg_Dealer, cfg_Service, cfg_Name, cfg_Value)
+SELECT h.cfg_Dealer, h.cfg_Service, h.cfg_Name, h.new_value
+  FROM #hostfiles h
+ WHERE NOT EXISTS (SELECT 1 FROM dbo.cfg_Configurations c
+                    WHERE c.cfg_Name = h.cfg_Name AND c.cfg_Service = h.cfg_Service
+                      AND ISNULL(c.cfg_Dealer, N'') = ISNULL(h.cfg_Dealer, N''));
+
+PRINT N'Power file paths added: ' + CAST(@@ROWCOUNT AS NVARCHAR(10));
 
 COMMIT;
 

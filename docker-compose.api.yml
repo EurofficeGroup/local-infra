@@ -67,8 +67,7 @@ services:
   #   9020  product        also answers /DeliveryCharge - one service, one repo
   #   9050  payments       see the note on the service below
   #   9100  audience
-  #   9012  search         NOT here: that is the Elasticsearch API, deliberately
-  #                        left on TEST4 (the index is too big to host locally)
+  #   9012  search         profile 'search' only - see search-api at the end
   #
   # Each is built from its own repo checked out next to this one. Missing ones:
   #   .\clone-apis.ps1
@@ -220,6 +219,57 @@ services:
       - "${PAYMENTS_API_PORT}:9050"
     volumes:
       - ./files:/files
+    depends_on:
+      config-api:
+        condition: service_healthy
+    networks: [hostnet]
+    mem_limit: ${API_MEM}
+    mem_reservation: ${API_MEM_RES}
+    cpus: ${API_CPUS}
+
+
+  # ==================================================================
+  # Profile: search - the Elasticsearch search API (repo eurofficegroup.search,
+  # folder ../search). Read-only: it queries the product and smart-search
+  # indices; noodles-searches (docker-compose.noodles.yml) writes them.
+  #
+  # Not started by a plain `up`: without it SearchApiServiceUrl keeps pointing
+  # at TEST4's copy, which is what the sites use unless you opt in with
+  #   ops-local.bat search-on
+  # That command also repoints SearchApiServiceUrl at http://search-api:9012
+  # (sql/init/40-search-local.sql); hosts-setup.ps1 maps search-api to
+  # 127.0.0.1 so the IIS sites reach the published port.
+  #
+  # ElasticSearchConnectionString is pinned here, not only in the database:
+  # the configuration client lets the process environment win over
+  # config-api, so this container can only ever query the local node, whatever
+  # cfg_Configurations says.
+  # ==================================================================
+  search-api:
+    profiles: ["search", "all"]
+    container_name: search-api
+    # Part of the dealer-routing key of its NServiceBus endpoint (it listens
+    # for ConfigurationChangedEvent), and Environment=local appends the machine
+    # name - same reason config-api and noodles set it.
+    hostname: ${LOCAL_HOSTNAME}
+    image: ${SEARCH_API_IMAGE}
+    build:
+      context: ../search
+      dockerfile: ../local-infra/docker/api-service.Dockerfile
+      args:
+        SOURCE_DIR: "."
+        PROJECT: EurofficeGroup.Api.ElasticSearch
+        ENTRY: EurofficeGroup.Api.ElasticSearch.dll
+        PORT: "9012"
+    restart: unless-stopped
+    environment:
+      DealerGroup: ${INFRA_DEALER_GROUP}
+      Environment: ${INFRA_ENVIRONMENT}
+      ConfigurationUrl: ${CONFIGURATION_URL}
+      ElasticSearchApiPort: "9012"
+      ElasticSearchConnectionString: http://elastic:9200
+    ports:
+      - "${SEARCH_API_PORT}:9012"
     depends_on:
       config-api:
         condition: service_healthy
