@@ -304,8 +304,9 @@ INSERT INTO #flat (name, value) VALUES
     -- Power on Windows writes data bus keys as 'yyyy-MM-dd_HH\guid'; noodles on
     -- Linux reads the backslash as part of the file name, so every PSP upload
     -- failed with DirectoryNotFoundException. Noodles (DataBusKeySeparatorBehaviour)
-    -- swaps it for '/' when this is on. Off by default everywhere else.
-    (N'NServiceBusDataBusNormalizeKeys', N'true');
+    -- swaps it for '/' when this is on. local-infra only: the key exists nowhere
+    -- else, and noodles treats a missing key as off.
+    (N'LocalInfra.NServiceBusDataBusNormalizeKeys', N'true');
 
 -- Keys deliberately NOT touched:
 --   ElasticSearchConnectionString, SearchApiServiceUrl, the synonym transport row
@@ -425,6 +426,9 @@ SELECT NULL, NULL, f.name, f.value
  WHERE NOT EXISTS (SELECT 1 FROM dbo.cfg_Configurations c WHERE c.cfg_Name = f.name);
 
 PRINT N'Endpoint values added: ' + CAST(@@ROWCOUNT AS NVARCHAR(10));
+
+-- Old name of LocalInfra.NServiceBusDataBusNormalizeKeys, noodles no longer reads it
+DELETE FROM dbo.cfg_Configurations WHERE cfg_Name = N'NServiceBusDataBusNormalizeKeys';
 
 UPDATE dbo.cfg_Configurations
    SET cfg_Value = @FileRoot + RIGHT(cfg_Value, CHARINDEX(N'\', REVERSE(cfg_Value) + N'\') - 1)
