@@ -85,6 +85,7 @@ Runtime config for DB-driven keys is **not** read from `appsettings.json` — it
 | `power-local-setup.ps1` | After WebConfigPicker, or whenever the Power `web.config`s were reset (elevated) | Sets `ConfigurationUrl`, `ForceIntegratedSecurity=false`, local API URLs, local Redis/RabbitMQ, and `Environment` / `DealerGroup` / `DealerId` from `.env`. Also `ops-local.bat power` |
 | `sql/init/40-search-local.sql` / `41-search-remote.sql` | Through `search-local.ps1` only | Switch the search configuration (`SearchApiServiceUrl`, Elasticsearch connection strings, synonym transport) to the local containers and back |
 | `search-local.ps1` | `ops-local.bat search-*`, `setup-local.bat --search` | Local search stack on / off / rebuild / status, in the safe order - see [Local search](#local-search-elasticsearch) |
+| `migrate-local.ps1` | After writing or pulling a migration in `../database` | Builds the three migrator projects of `../database` (Debug) and applies their pending migrations to `<prefix>_productcatalogue`, every dealer database and `<prefix>_supportcentre`; `-Preview` writes nothing, `-Restart` then restarts config-api, noodles and the IIS app pools. Also `ops-local.bat db-migrate [preview|restart]` - see [Database migrations](#database-migrations) |
 | `setup-local.bat` | From scratch | Runs the above in order (except manual Power) |
 | `ops-local.bat` | Day-to-day | Rebuild/restart noodles, config-api, APIs; re-run overrides; reset tasks; local search on/off |
 | `cleanup-local.bat` | When disk is full | Prunes **this project's** build cache + unused images (compose label); never touches volumes, running containers, or other Docker apps |
@@ -307,6 +308,39 @@ RAM/CPU limits live in `.env`; `MSSQL_SA_PASSWORD` lives in `.env.local` — lea
 
 ---
 
+## Database migrations
+
+Schema and data changes live in the sibling repo `../database` (FluentMigrator). After you write or pull a migration there:
+
+```bat
+ops-local.bat db-migrate preview
+ops-local.bat db-migrate
+ops-local.bat db-migrate restart
+```
+
+| Command | What it does | Changes the databases? |
+|---|---|---|
+| `ops-local.bat db-migrate preview` | Dry run: lists, per database, the migrations that are not applied yet and prints their SQL. Ends with "Summary - PREVIEW, would apply" | No - nothing is executed, `dbo.VersionInfo` stays as it is |
+| `ops-local.bat db-migrate` | Real run: executes those migrations and records them in `dbo.VersionInfo`. Ends with "Summary - applied" | Yes. Running it again applies nothing that is already there |
+| `ops-local.bat db-migrate restart` | The real run, then - only if something was applied - recreates `config-api` and the `noodles-*` containers and recycles the app pools of the IIS sites `wfe`, `portal`, `admin`, `cdn`, so cached configuration and CMS content are read again | Yes, same as `db-migrate` |
+
+Run `preview` first, check the list (a TEST4 restore also brings master migrations TEST4 did not have yet), then run `db-migrate`.
+
+`migrate-local.ps1` (what `db-migrate` runs):
+
+1. builds `EurofficeGroup.Database.Migrator.ProductCatalogue`, `.Dealer` and `.SupportCentre` in Debug (public NuGet only, no VPN);
+2. finds the local databases by `INFRA_DB_PREFIX`: `<prefix>_productcatalogue`, every `<prefix>_<dealer>` that has `dbo.cus_Customers` (dealer code = the name after the prefix), `<prefix>_supportcentre`;
+3. runs `Migrate.exe` against each of them in that order (as `../database/src/LocalDeploy.ps1` does) with the deploy context: `dealer_ref`, the database names, `environment` = `INFRA_ENVIRONMENT`, `dealer_group` = `INFRA_DEALER_GROUP`;
+4. prints which migrations each database got.
+
+- **Not only yours.** A database restored from TEST4 also gets every master migration TEST4 did not have yet. Run `preview` first to see the list.
+- Re-running is safe: FluentMigrator only applies what is missing from `dbo.VersionInfo`.
+- Stops at the first failing database; the ones after it are not migrated.
+- Options when calling the script directly: `-Database dev_uk_jst` (only these databases), `-SkipBuild`, `-Workspace <folder>` (default: the parent of `local-infra`).
+- Power and noodles cache configuration and CMS content. Most migrations (schema, indexes) need no restart; one that changes `cfg_Configurations` or CMS content does - use `db-migrate restart`. Recycling the app pools needs an elevated prompt; without one that step is skipped with a warning (recycle them in IIS Manager). Redis is not flushed: what Power cached there stays until it expires. Restarting noodles takes a minute or two, and the recycle drops Power's in-process sessions (log in again).
+
+---
+
 ## Local search (Elasticsearch)
 
 By default the sites use **TEST4's** search: `SearchApiServiceUrl` points at the search API on `vm-test-uks-04:9012`, and that API reads TEST4's cluster. Anything created only in the local databases - a custom list uploaded through the PSP, a new item - therefore shows its name on the storefront but **no products** ("0 of 0 products / No items"): the storefront asks the search API for the list's products, and TEST4 has never heard of the list.
@@ -319,7 +353,7 @@ The `search` profile replaces that with three local containers:
 | `search-api` | The search API on `:9012` - read-only, what the storefront / PSP call | `../search` (repo `eurofficegroup.search`) |
 | `noodles-searches` | The indexer `Noodles.SearchEs`: full rebuild from the dealer DB, then live updates from events (`ItemDetailChangedDealerEvent`, ...) | `../integrations` (repo `eurofficegroup.integrations`) |
 
-One dealer's product index is ~120k documents / ~360 MB, so it fits comfortably. Extra memory: about 2 GB (elastic) + 1 GB (indexer) + 0.5 GB (search API) + 1 GB (Kibana).
+One dealer's product index is ~120k documents / ~300 MB, so it fits comfortably. Extra memory actually used (`docker stats`, JST indexed, idle): about 1.8 GB (elastic: the 1 GB heap is fixed by `ELASTIC_HEAP`, plus off-heap) + 0.6 GB (Kibana) + 0.2 GB (indexer) + 0.15 GB (search API), so ~2.7 GB in total. The `*_MEM` values in `.env` are caps, not usage: 2 GB / 1 GB / 1 GB / 512 MB.
 
 ### Switch on
 
@@ -414,7 +448,7 @@ docker inspect <container> --format "{{.RestartCount}}"
 7. **Power without explicit Rabbit/Cache** can still fall back to remote values from the DB.
 8. **`power/docker-compose.yml` and this stack** share ports — do not run both.
 9. No local Azure Files equivalent; paths are repointed to `/files` inside containers.
-10. **Power and noodles share one data bus folder.** File uploads from the PSP and PDFs travel as NServiceBus data bus files. Noodles reads `/files/...`; Power on Windows gets the same folder as `<local-infra>\files\...` through `cfg_Service` rows for `portal`, `frontend`, `support`, `suppliers` (the Support site's `ServiceName` in its Web.config), `static`, `datamanagement` and `genericprocess` (section 4 of `20-docker-overrides.sql`, path substituted by `setup-local.bat` / `ops-local.bat`). Power writes keys as `yyyy-MM-dd_HH\guid`; `LocalInfra.NServiceBusDataBusNormalizeKeys=true` (local-infra only, set nowhere else) makes noodles turn the `\` into `/` (needs a noodles build that has `DataBusKeySeparatorBehaviour`). Symptom without it: uploads never finish and `noodles-uploaders` logs `DirectoryNotFoundException ... /files/fshare-...\<guid>`.
+10. **Power and noodles share one data bus folder.** File uploads from the PSP and PDFs travel as NServiceBus data bus files. Noodles reads `/files/...`; Power on Windows gets the same folder as `<local-infra>\files\...` through `cfg_Service` rows for `portal`, `frontend`, `support`, `suppliers` (the Support site's `ServiceName` in its Web.config), `static`, `datamanagement` and `genericprocess` (section 4 of `20-docker-overrides.sql`, path substituted by `setup-local.bat` / `ops-local.bat`). Power writes keys as `yyyy-MM-dd_HH\guid`; noodles (`DataBusKeySeparatorBehaviour`) turns the `\` into `/` by itself when `Environment` is `local` (`INFRA_ENVIRONMENT=local`) and it is not running on Windows, i.e. in Docker; no configuration key needed. Run from Rider on Windows, it reads the `\` keys as they are. Symptom without it: uploads never finish and `noodles-uploaders` logs `DirectoryNotFoundException ... /files/fshare-...\<guid>`.
 
 ---
 
@@ -485,6 +519,7 @@ Typical loop after the stack is healthy:
 | Want list/search products from the local DB on the storefront | `ops-local.bat search-on`, then the product index export - see [Local search](#local-search-elasticsearch) |
 | `../search` or `../integrations` source | `ops-local.bat search-rebuild` |
 | Rebuild refused (`EX007`), or list uploads never reach the storefront | `ops-local.bat search-reset`, then the product index export again |
+| Wrote or pulled a migration in `../database` | `ops-local.bat db-migrate preview`, then `ops-local.bat db-migrate` (or `db-migrate restart` if it changes configuration or CMS content) - see [Database migrations](#database-migrations) |
 
 ### How to run
 
@@ -510,6 +545,9 @@ ops-local.bat search-status
 ops-local.bat search-off
 ops-local.bat search-rebuild
 ops-local.bat search-reset
+ops-local.bat db-migrate preview
+ops-local.bat db-migrate
+ops-local.bat db-migrate restart
 ```
 
 4. The window prints progress, then a green `Done.` and waits for a keypress.

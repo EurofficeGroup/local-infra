@@ -25,5 +25,6 @@ docker exec -it mssql /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P '<MSSQ
 
 ## Migrations
 
-The workspace contains `C:\workspace\database` (EurofficeGroup.Database.Migrator) —
-most likely that is what should apply the schema to the local instance.
+Migrations from `C:\workspace\database` (EurofficeGroup.Database.Migrator) are applied to the
+local databases by `migrate-local.ps1` / `ops-local.bat db-migrate [preview]` - see
+"Database migrations" in the main README.

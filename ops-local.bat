@@ -27,6 +27,12 @@ rem    search-off              Back to TEST4 search; stops the search containers
 rem    search-rebuild          search-on, rebuilding the search-api / noodles-searches images
 rem    search-status           Search containers, configuration values and indices
 rem    search-reset            Unstick the indexer: empty its queue, clear its saga state
+rem    db-migrate [preview|restart]
+rem                            Build ../database and apply its pending migrations to the
+rem                            local product catalogue, dealer and support-centre databases
+rem                            (migrate-local.ps1); preview = list and show SQL, write nothing;
+rem                            restart = then recreate config-api + noodles and recycle the
+rem                            IIS app pools (elevated prompt for the app pools)
 rem    power                   Re-apply local settings to the Power web.configs
 rem                            power-local-setup.ps1 - needs Administrator
 rem    help                    Show this list
@@ -113,6 +119,7 @@ if /i "%ACTION%"=="search-off"      goto act_search
 if /i "%ACTION%"=="search-rebuild"  goto act_search
 if /i "%ACTION%"=="search-status"   goto act_search
 if /i "%ACTION%"=="search-reset"    goto act_search
+if /i "%ACTION%"=="db-migrate"      goto act_db_migrate
 
 echo Unknown action: %ACTION%
 echo.
@@ -248,6 +255,23 @@ if errorlevel 1 (
 )
 goto success
 
+:act_db_migrate
+set "MIGRATE_ARGS="
+if /i "%SVC_ARG%"=="preview" set "MIGRATE_ARGS=-Preview"
+if /i "%SVC_ARG%"=="restart" set "MIGRATE_ARGS=-Restart"
+if not "%SVC_ARG%"=="" if not defined MIGRATE_ARGS (
+  echo ERROR: unknown option '%SVC_ARG%' - use: ops-local.bat db-migrate [preview^|restart]
+  call :fail_pause
+  exit /b 1
+)
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0migrate-local.ps1" %MIGRATE_ARGS%
+if errorlevel 1 (
+  echo ERROR: migrate-local.ps1 failed - the reason is printed above.
+  call :fail_pause
+  exit /b 1
+)
+goto success
+
 :act_power
 echo.
 echo === local-infra ops: power ===
@@ -349,6 +373,10 @@ echo   search-off               Back to TEST4 search, search containers stopped
 echo   search-rebuild           search-on with a rebuild of the search-api / noodles-searches images
 echo   search-status            Search containers, configuration and indices
 echo   search-reset             Unstick the indexer after an aborted rebuild or a restore
+echo   db-migrate [preview^|restart]
+echo                            Build ../database, apply pending migrations to the local databases
+echo                            preview: show only, write nothing
+echo                            restart: then recreate config-api + noodles, recycle IIS app pools
 echo   power                    Re-apply local settings to Power web.configs - elevated
 echo   help                     This list
 echo.
