@@ -527,7 +527,7 @@ Typical loop after the stack is healthy:
 
 | You changed… | Run |
 |---|---|
-| Any Noodles service source | `ops-local.bat noodles-rebuild` |
+| Any Noodles service source, or a shared library (`Noodles.Domain`, `Noodles.Configuration`, …) | `ops-local.bat noodles-rebuild` |
 | One Noodles service only (faster) | `ops-local.bat noodles-rebuild sales` (or `actions`, `email`, …) |
 | Need a container bounce, same image | `ops-local.bat noodles-restart` |
 | `api.configuration` source | `ops-local.bat config-rebuild` |
@@ -576,6 +576,7 @@ ops-local.bat db-migrate restart
 ### Notes
 
 - `noodles-rebuild` rebuilds the shared image `infra/noodles:local` (VPN may be required for NuGet), then recreates `noodles-*` containers. **`config-api` is left alone.**
+- `noodles-rebuild <name>` builds only that project (`docker/noodles-one.Dockerfile`, compose service `noodles-build-one`) and lays its `/app/Noodles.<Name>` folder over the existing `infra/noodles:local`, keeping the tag, then recreates only `noodles-<name>`. The other services keep their code in the image, so a change to a shared library reaches only the rebuilt service; run `noodles-rebuild` without a name for that. It needs the full image to exist. NuGet packages stay in a BuildKit cache between these builds. Each run adds a layer; the next full `noodles-rebuild` starts from scratch and `cleanup-local.bat` removes the superseded images.
 - Short service names map to compose services: `sales` → `noodles-sales`.
 - `noodles-rebuild` needs the internal NuGet feed; if restore fails, connect VPN and retry.
 - Prefer `ops-local.bat` over hand-rolled `docker compose` so recreate flags stay consistent (`--force-recreate --no-deps` where needed).

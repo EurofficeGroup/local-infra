@@ -11,7 +11,8 @@ rem    ops-local.bat <action> [service]
 rem
 rem  Actions:
 rem    noodles-rebuild [name]  Rebuild infra/noodles:local, recreate noodles
-rem                            Optional name: sales -> noodles-sales only
+rem                            Optional name: sales -> rebuild only Noodles.Sales on top of
+rem                            the image, recreate noodles-sales only
 rem    noodles-restart [name]  Recreate noodles containers (no rebuild)
 rem    config-rebuild          Rebuild and recreate config-api
 rem    config-restart          Recreate config-api only
@@ -123,6 +124,7 @@ goto show_help
 rem ---------- actions ----------
 
 :act_noodles_rebuild
+if not "%SVC_ARG%"=="" goto act_noodles_rebuild_one
 echo Rebuilding noodles image VPN / NuGet may be required ...
 %DC_NOODLES% build noodles-build
 if errorlevel 1 (
@@ -131,6 +133,26 @@ if errorlevel 1 (
   exit /b 1
 )
 call :recreate_noodles
+if errorlevel 1 (
+  call :fail_pause
+  exit /b 1
+)
+goto success
+
+:act_noodles_rebuild_one
+call :read_noodles_project "%SVC_ARG%"
+if errorlevel 1 (
+  call :fail_pause
+  exit /b 1
+)
+echo Rebuilding only %NOODLES_PROJECT% on top of the noodles image VPN / NuGet may be required ...
+%DC_NOODLES% build --build-arg SERVICE=%NOODLES_PROJECT% noodles-build-one
+if errorlevel 1 (
+  echo ERROR: noodles-build-one failed. If the noodles image does not exist yet, run ops-local.bat noodles-rebuild first.
+  call :fail_pause
+  exit /b 1
+)
+call :recreate_one_noodles "%SVC_ARG%"
 if errorlevel 1 (
   call :fail_pause
   exit /b 1
@@ -304,6 +326,15 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }"
 exit /b %ERRORLEVEL%
 
+:read_noodles_project
+set "NOODLES_PROJECT="
+for /f "usebackq delims=" %%P in (`powershell -NoProfile -Command "$s = (docker compose -f docker-compose.noodles.yml config --format json | ConvertFrom-Json).services.'noodles-%~1'; if ($s) { $s.environment.NOODLES_SERVICE }"`) do set "NOODLES_PROJECT=%%P"
+if not defined NOODLES_PROJECT (
+  echo ERROR: noodles-%~1 is not a noodles service in docker-compose.noodles.yml.
+  exit /b 1
+)
+exit /b 0
+
 :recreate_one_noodles
 set "ONE=noodles-%~1"
 echo Recreating %ONE% ...
@@ -360,6 +391,7 @@ echo Usage:  ops-local.bat ^<action^> [service]
 echo.
 echo Actions:
 echo   noodles-rebuild [name]   Rebuild noodles image + recreate containers
+echo                            With a name only that service is rebuilt and recreated
 echo                            Example: ops-local.bat noodles-rebuild sales
 echo   noodles-restart [name]   Recreate noodles only no rebuild
 echo   config-rebuild           Rebuild + recreate config-api

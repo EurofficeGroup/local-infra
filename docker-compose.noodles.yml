@@ -61,6 +61,17 @@ services:
     entrypoint: ["true"]
     networks: [hostnet]
 
+  noodles-build-one:
+    profiles: ["build"]
+    image: ${NOODLES_IMAGE}
+    build:
+      context: ../noodles
+      dockerfile: ../local-infra/docker/noodles-one.Dockerfile
+      args:
+        NOODLES_IMAGE: ${NOODLES_IMAGE}
+    entrypoint: ["true"]
+    networks: [hostnet]
+
 
   noodles-actions:
     container_name: noodles-actions
