@@ -57,6 +57,7 @@ RUN set -eux; \
     ; do \
         dotnet publish "src/$p/$p.csproj" \
             -c "$BUILD_CONFIG" \
+            -p:Optimize=false \
             -o "/app/$p" \
             --no-self-contained; \
     done

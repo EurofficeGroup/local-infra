@@ -482,6 +482,8 @@ Init scripts: [`sql/init/README.md`](sql/init/README.md).
 
 Stop its container and run the project from Rider — same hostnames (`hosts-setup.ps1`), same ports.
 
+Or attach the debugger to the running container. The image is built as Release with `-p:Optimize=false`, so every line can take a breakpoint. It is not a Debug build on purpose: under `#if DEBUG` eight services pass `isDebug = true` to `RegisterRedisStackCacheProvider`, which appends the host name to the Redis cache prefix and topics, while Power here runs with `Redis.AppendHostNameToCachePrefix=false` (`20-docker-overrides.sql`), so noodles and Power would stop sharing the cache.
+
 ---
 
 ## Day-to-day ops (`ops-local.bat`)
