@@ -11,14 +11,16 @@
 
     -Mode On
         1. clones ../search and ../integrations if they are missing (never pulls)
-        2. creates files\elastic\synonyms.txt if it is missing
-        3. starts elastic (+ kibana) and waits until it is healthy
-        4. runs sql/init/40-search-local.sql: SearchApiServiceUrl, the Elasticsearch
+        2. starts elastic (+ kibana) and waits until it is healthy
+        3. runs sql/init/40-search-local.sql: SearchApiServiceUrl, the Elasticsearch
            connection strings and the synonym transport now point at this machine
-        5. recreates config-api, so services read the new values
-        6. builds search-api / noodles-searches if their images are missing, then
+        4. recreates config-api, so services read the new values
+        5. builds search-api / noodles-searches if their images are missing, then
            starts them
-        7. checks that 'search-api' resolves on this machine (hosts-setup.ps1)
+        6. checks that 'search-api' resolves on this machine (hosts-setup.ps1)
+        7. starts a product index rebuild for INFRA_DEALER_CODE: sends the
+           StartDealerReindexMessage that "Start Product index Export" on
+           http://admin/Dev/SearchEngine sends. -SkipIndex leaves this out.
     -Mode Rebuild   the same, but always rebuilds the two images (after a pull or
                     a code change in ../search or ../integrations)
     -Mode Off       stops noodles-searches and search-api, runs
@@ -33,10 +35,10 @@
                     postponed) and after a restore, which brings TEST4's saga
                     rows along. Indices are left alone.
 
-    The containers never depend on step 4 for safety: compose pins the
+    The containers never depend on step 3 for safety: compose pins the
     Elasticsearch connection strings of search-api and noodles-searches to
     http://elastic:9200 through environment variables, which the configuration
-    client ranks above config-api. Step 4 is for Power (SearchApiServiceUrl) and
+    client ranks above config-api. Step 3 is for Power (SearchApiServiceUrl) and
     noodles-transport (where the synonym file goes).
 
     Normally called through  ops-local.bat search-on | search-off | search-rebuild
@@ -45,13 +47,16 @@
 .EXAMPLE
     .\search-local.ps1 -Mode On
 .EXAMPLE
+    .\search-local.ps1 -Mode On -SkipIndex
+.EXAMPLE
     .\search-local.ps1 -Mode Status
 #>
 
 [CmdletBinding()]
 param(
     [ValidateSet('On', 'Off', 'Rebuild', 'Status', 'Reset')]
-    [string] $Mode = 'Status'
+    [string] $Mode = 'Status',
+    [switch] $SkipIndex
 )
 
 # Not 'Stop': docker and docker compose write progress and warnings to stderr,
@@ -88,9 +93,22 @@ $DbPrefix      = Read-EnvValue 'INFRA_DB_PREFIX' 'dev_uk'
 $SupportCentre = "${DbPrefix}_supportcentre"
 $NServiceBusDb = "${DbPrefix}_nservicebus"
 $SqlCmd        = '/opt/mssql-tools18/bin/sqlcmd'
+$DealerCode    = (Read-EnvValue 'INFRA_DEALER_CODE' 'jst').ToLower()
+$DealerGroup   = (Read-EnvValue 'INFRA_DEALER_GROUP' 'pow').ToLower()
+$Environment   = Read-EnvValue 'INFRA_ENVIRONMENT' 'local'
+$LocalHostName = Read-EnvValue 'LOCAL_HOSTNAME' $env:COMPUTERNAME.ToLower()
+$RabbitUser    = Read-EnvValue 'RABBIT_USER' 'guest'
+$RabbitPass    = Read-EnvValue 'RABBIT_PASS' 'guest'
+$RabbitUi      = Read-EnvValue 'RABBIT_UI_PORT' '15672'
+
+# The endpoint's queue name, as the NServiceBus log prints it:
+# <Environment>_<hostname>.<group>.noodles.searches, plus the instance queue.
+$IndexerQueue  = "${Environment}_${LocalHostName}.${DealerGroup}.noodles.searches"
+$RabbitAuth    = @{ Authorization = 'Basic ' + [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("${RabbitUser}:${RabbitPass}")) }
 
 if (-not $SaPassword) { throw 'MSSQL_SA_PASSWORD is not set in .env.local.' }
 if ($DbPrefix -notmatch '^[A-Za-z0-9_]+$') { throw "INFRA_DB_PREFIX '$DbPrefix' contains invalid characters." }
+if ($DealerCode -notmatch '^[a-z0-9_]+$') { throw "INFRA_DEALER_CODE '$DealerCode' contains invalid characters." }
 
 # Compose interpolates the password from .env.local; keep identical to the .bat files.
 $env:COMPOSE_ENV_FILES = '.env,.env.local'
@@ -99,8 +117,6 @@ $ComposePower   = @('compose', '-f', 'docker-compose.yml', '--profile', 'search'
 $ComposeApi     = @('compose', '-f', 'docker-compose.api.yml', '--profile', 'search')
 $ComposeNoodles = @('compose', '-f', 'docker-compose.noodles.yml', '--profile', 'search')
 
-$SynonymDir  = Join-Path $PSScriptRoot 'files\elastic'
-$SynonymFile = Join-Path $SynonymDir 'synonyms.txt'
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -199,6 +215,50 @@ function Test-SearchApiHostname {
     return $false
 }
 
+function Test-ReindexMarkedRunning {
+    $query = "SET NOCOUNT ON; " +
+             "IF OBJECT_ID('dbo.ProductReindexFromDbSagaData') IS NULL SELECT 0 " +
+             "ELSE SELECT COUNT(*) FROM dbo.ProductReindexFromDbSagaData WHERE IsRunning = 1 AND DealerNumber = '$DealerCode';"
+    $out = & docker exec mssql $SqlCmd -S localhost -U sa -P $SaPassword -C -b -h -1 -W -d $NServiceBusDb -Q $query
+    if ($LASTEXITCODE -ne 0) { throw "Reading the product-reindex saga state in [$NServiceBusDb] failed (sqlcmd exit code $LASTEXITCODE)." }
+    return ([int](($out | Where-Object { $_.Trim() }) | Select-Object -Last 1) -gt 0)
+}
+
+function Send-StartDealerReindex([int] $TimeoutSeconds) {
+    $messageId = [guid]::NewGuid().ToString()
+    $body = @{
+        routing_key      = $IndexerQueue
+        payload          = (@{ DealerNumber = $DealerCode } | ConvertTo-Json -Compress)
+        payload_encoding = 'string'
+        properties       = @{
+            message_id    = $messageId
+            content_type  = 'application/json'
+            delivery_mode = 2
+            headers       = @{
+                'NServiceBus.MessageId'            = $messageId
+                'NServiceBus.MessageIntent'        = 'Send'
+                'NServiceBus.ContentType'          = 'application/json'
+                'NServiceBus.TimeSent'             = [DateTime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ss:ffffff', [Globalization.CultureInfo]::InvariantCulture) + ' Z'
+                'NServiceBus.EnclosedMessageTypes' = 'Noodles.SearchEs.Messages.StartDealerReindexMessage, Noodles.SearchEs.Messages'
+                'Euroffice.DealerName'             = $DealerCode
+                'Euroffice.DealerGroup'            = $DealerGroup
+            }
+        }
+    } | ConvertTo-Json -Depth 5
+
+    Write-Host "Sending StartDealerReindexMessage for '$DealerCode' to $IndexerQueue (up to $TimeoutSeconds s for the queue) ..."
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        try {
+            $result = Invoke-RestMethod -Method Post -Uri "http://localhost:$RabbitUi/api/exchanges/%2F/amq.default/publish" `
+                -Headers $RabbitAuth -ContentType 'application/json' -Body $body -ErrorAction Stop
+            if ($result.routed) { Write-Host '  sent.'; return }
+        } catch { }
+        Start-Sleep -Seconds 5
+    }
+    throw "Could not deliver StartDealerReindexMessage to $IndexerQueue in $TimeoutSeconds s - is noodles-searches running (docker logs noodles-searches)?"
+}
+
 # ---------------------------------------------------------------------------
 # Modes
 # ---------------------------------------------------------------------------
@@ -215,25 +275,14 @@ if ((Get-ContainerHealth 'mssql') -ne 'healthy') {
 }
 
 if ($Mode -eq 'Reset') {
-    # The endpoint's queue name, as the NServiceBus log prints it:
-    # <Environment>_<hostname>.<group>.noodles.searches, plus the instance queue.
-    $environment = Read-EnvValue 'INFRA_ENVIRONMENT' 'local'
-    $hostName    = Read-EnvValue 'LOCAL_HOSTNAME' $env:COMPUTERNAME.ToLower()
-    $group       = Read-EnvValue 'INFRA_DEALER_GROUP' 'pow'
-    $rabbitUser  = Read-EnvValue 'RABBIT_USER' 'guest'
-    $rabbitPass  = Read-EnvValue 'RABBIT_PASS' 'guest'
-    $rabbitUi    = Read-EnvValue 'RABBIT_UI_PORT' '15672'
-    $queue       = "${environment}_${hostName}.${group}.noodles.searches"
-
     Write-Step 'Stopping noodles-searches'
     Invoke-Docker -Arguments ($ComposeNoodles + @('stop', 'noodles-searches')) -What 'Stopping noodles-searches'
 
-    Write-Step "Emptying $queue"
-    $auth = 'Basic ' + [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("${rabbitUser}:${rabbitPass}"))
-    foreach ($q in @($queue, "$queue-$hostName")) {
+    Write-Step "Emptying $IndexerQueue"
+    foreach ($q in @($IndexerQueue, "$IndexerQueue-$LocalHostName")) {
         try {
-            Invoke-RestMethod -Method Delete -Uri "http://localhost:$rabbitUi/api/queues/%2F/$q/contents" `
-                -Headers @{ Authorization = $auth } -ErrorAction Stop | Out-Null
+            Invoke-RestMethod -Method Delete -Uri "http://localhost:$RabbitUi/api/queues/%2F/$q/contents" `
+                -Headers $RabbitAuth -ErrorAction Stop | Out-Null
             Write-Host "  purged $q"
         } catch {
             Write-Host "  $q - not purged ($($_.Exception.Message))"
@@ -251,7 +300,7 @@ if ($Mode -eq 'Reset') {
     Invoke-Docker -Arguments ($ComposeNoodles + @('up', '-d', '--no-deps', 'noodles-searches')) -What 'Starting noodles-searches'
 
     Write-Host ''
-    Write-Host 'Indexer reset. Start a rebuild again from http://admin/Dev/SearchEngine.' -ForegroundColor Green
+    Write-Host 'Indexer reset. Start a rebuild again: ops-local.bat search-on, or http://admin/Dev/SearchEngine.' -ForegroundColor Green
     exit 0
 }
 
@@ -279,17 +328,6 @@ try {
     & (Join-Path $PSScriptRoot 'clone-apis.ps1') -Search -NoPull
 } catch {
     throw "clone-apis.ps1 failed: $($_.Exception.Message)"
-}
-
-Write-Step 'Synonym file'
-if (-not (Test-Path -LiteralPath $SynonymDir)) { New-Item -ItemType Directory -Path $SynonymDir -ErrorAction Stop | Out-Null }
-if (-not (Test-Path -LiteralPath $SynonymFile)) {
-    # Empty is valid: no synonyms until "Populate Synonym File For Product Index"
-    # in the Support Centre writes the real list here through noodles-transport.
-    [System.IO.File]::WriteAllText($SynonymFile, '')
-    Write-Host "  created empty $SynonymFile"
-} else {
-    Write-Host "  $SynonymFile exists"
 }
 
 Write-Step 'Elasticsearch'
@@ -341,15 +379,35 @@ if (-not $hostsOk) {
                    "SearchApiServiceUrl=http://search-api:9012/Search/. Run once, elevated:  .\hosts-setup.ps1")
 }
 
+$indexStarted = $false
+if ($SkipIndex) {
+    Write-Step 'Product index rebuild skipped (-SkipIndex)'
+} else {
+    Write-Step "Product index rebuild for '$DealerCode'"
+    if (Test-ReindexMarkedRunning) {
+        Write-Warning ("A product index rebuild for '$DealerCode' is already marked running in [$NServiceBusDb] " +
+                       "(restored from TEST4, or an aborted rebuild), so the indexer would refuse a new one (EX007). " +
+                       "Run  ops-local.bat search-reset , then  ops-local.bat search-on  again.")
+    } else {
+        Send-StartDealerReindex 180
+        $indexStarted = $true
+    }
+}
+
 Show-Status
 
 Write-Host ''
 Write-Host 'Local search stack is up.' -ForegroundColor Green
 Write-Host 'Next:'
 Write-Host '  1. Recycle the app pools of wfe, portal and admin (or iisreset, elevated) - Power caches SearchApiServiceUrl.'
-Write-Host '  2. Build the product index once: http://admin -> select the dealer (Dealer Map, or'
-Write-Host '     http://admin/Dealer/Impersonate/<dlr_Key>) -> http://admin/Dev/SearchEngine -> "Start Product index Export".'
-Write-Host '     Follow it with:  docker logs -f noodles-searches   and   ops-local.bat search-status'
-Write-Host '  3. Optional: "Populate Synonym File For Product Index" on the same page fills files\elastic\synonyms.txt.'
+if ($indexStarted) {
+    Write-Host "  2. The product index for '$DealerCode' is being built. Follow it with:"
+    Write-Host '     docker logs -f noodles-searches   and   ops-local.bat search-status'
+} else {
+    Write-Host '  2. Build the product index once: http://admin -> select the dealer (Dealer Map, or'
+    Write-Host '     http://admin/Dealer/Impersonate/<dlr_Key>) -> http://admin/Dev/SearchEngine -> "Start Product index Export".'
+    Write-Host '     Follow it with:  docker logs -f noodles-searches   and   ops-local.bat search-status'
+}
+Write-Host '  3. Optional: "Populate Synonym File For Product Index" on http://admin/Dev/SearchEngine fills files\elastic\synonyms.txt.'
 Write-Host 'Back to TEST4 search:  ops-local.bat search-off'
 exit 0

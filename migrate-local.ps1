@@ -1,62 +1,3 @@
-<#
-.SYNOPSIS
-    Applies the pending FluentMigrator migrations of ../database to the local
-    Docker SQL Server: product catalogue, every dealer database, support centre.
-
-.DESCRIPTION
-    Run it after writing (or pulling) a migration in ../database:
-      1. builds the three migrator projects of ../database (Debug)
-      2. finds the local databases by INFRA_DB_PREFIX (.env):
-           <prefix>_productcatalogue   EurofficeGroup.Database.Migrator.ProductCatalogue
-           <prefix>_<dealer>           EurofficeGroup.Database.Migrator.Dealer, one run per
-                                       dealer database (a database with dbo.cus_Customers)
-           <prefix>_supportcentre      EurofficeGroup.Database.Migrator.SupportCentre
-      3. runs Migrate.exe against each of them in that order (the order of
-         ../database/src/LocalDeploy.ps1), with the context the deploy passes:
-         dealer_ref, database names, environment, dealer_group
-      4. prints which migrations each database got
-      5. with -Restart, and only when something was applied: recreates config-api
-         and the noodles-* containers, then recycles the app pools of the IIS
-         sites wfe, portal, admin, cdn (the last step needs an elevated prompt)
-
-    FluentMigrator only applies what is missing from dbo.VersionInfo, so the
-    script is safe to re-run. A restored TEST4 database also gets every master
-    migration that TEST4 did not have yet, not only yours - use -Preview first
-    to see the list.
-
-    Normally called through  ops-local.bat db-migrate [preview | restart].
-
-.PARAMETER Preview
-    FluentMigrator preview mode: lists and prints the SQL of the pending
-    migrations, writes nothing.
-
-.PARAMETER Database
-    Only these databases (full names, e.g. dev_uk_jst). Default: all of them.
-
-.PARAMETER Restart
-    After a real run that applied at least one migration, restart what caches
-    configuration and CMS content: config-api, the noodles-* containers (as
-    ops-local.bat config-restart / noodles-restart) and the app pools of the
-    IIS sites wfe, portal, admin, cdn. The app pools need an elevated prompt;
-    without one that step is skipped with a warning. Redis is not flushed.
-    Ignored with -Preview.
-
-.PARAMETER SkipBuild
-    Use the migrator binaries that are already built.
-
-.PARAMETER Workspace
-    Folder that holds the repositories side by side. Default: the parent of this one.
-
-.EXAMPLE
-    .\migrate-local.ps1 -Preview
-.EXAMPLE
-    .\migrate-local.ps1
-.EXAMPLE
-    .\migrate-local.ps1 -Restart
-.EXAMPLE
-    .\migrate-local.ps1 -Database dev_uk_jst
-#>
-
 [CmdletBinding()]
 param(
     [switch] $Preview,
@@ -66,16 +7,9 @@ param(
     [string] $Workspace
 )
 
-# Not 'Stop': dotnet, docker and Migrate.exe write to stderr, and Windows
-# PowerShell 5.1 turns such lines into terminating errors once redirected.
-# Failures are caught from $LASTEXITCODE instead.
 $ErrorActionPreference = 'Continue'
 Set-Location -LiteralPath $PSScriptRoot -ErrorAction Stop
 
-# ---------------------------------------------------------------------------
-# Settings from .env / .env.local - same lookup as :read_env in the .bat files.
-# The process environment wins, so values set by ops-local.bat are reused.
-# ---------------------------------------------------------------------------
 function Read-EnvValue {
     param([string] $Key, [string] $Default)
 
@@ -106,7 +40,6 @@ $SqlCmd      = '/opt/mssql-tools18/bin/sqlcmd'
 
 if (-not $SaPassword) { throw 'MSSQL_SA_PASSWORD is not set in .env.local.' }
 
-# They end up inside database names and the JSON context of Migrate.exe.
 foreach ($pair in @(@('INFRA_DB_PREFIX', $DbPrefix), @('INFRA_DEALER_CODE', $DealerCode),
                     @('INFRA_DEALER_GROUP', $DealerGroup), @('INFRA_ENVIRONMENT', $Environment))) {
     if ($pair[1] -notmatch '^[A-Za-z0-9_]+$') { throw "$($pair[0]) '$($pair[1])' in .env must be letters, digits or _ only." }
@@ -122,22 +55,16 @@ if (-not $Workspace) { $Workspace = Split-Path -Parent $PSScriptRoot }
 $DatabaseRepo = Join-Path $Workspace 'database'
 $MigratorSrc  = Join-Path $DatabaseRepo 'src'
 
-# Compose interpolates the password from .env.local; keep identical to the .bat files.
 $env:COMPOSE_ENV_FILES = '.env,.env.local'
 
-# IIS sites of Power, as in power-local-setup.ps1
 $IisSites = @('wfe', 'portal', 'admin', 'cdn')
 
-# Migrator kind -> project folder under ../database/src
 $Projects = [ordered]@{
     ProductCatalogue = 'EurofficeGroup.Database.Migrator.ProductCatalogue'
     Dealer           = 'EurofficeGroup.Database.Migrator.Dealer'
     SupportCentre    = 'EurofficeGroup.Database.Migrator.SupportCentre'
 }
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 function Write-Step([string] $Text) { Write-Host ''; Write-Host "== $Text" -ForegroundColor Cyan }
 
 function Get-BinFolder([string] $Kind) {
@@ -145,7 +72,6 @@ function Get-BinFolder([string] $Kind) {
 }
 
 function Get-LocalDatabases {
-    # name|1 when the database has dbo.cus_Customers (a dealer database), name|0 otherwise
     $query = "SET NOCOUNT ON; SELECT name + '|' + CASE WHEN OBJECT_ID(QUOTENAME(name) + '.dbo.cus_Customers') IS NULL THEN '0' ELSE '1' END FROM sys.databases WHERE state_desc = 'ONLINE' ORDER BY name;"
     $rows = & docker exec mssql $SqlCmd -S localhost -U sa -P $SaPassword -C -b -h -1 -W -Q $query
     if ($LASTEXITCODE -ne 0) { throw "Listing the databases failed (sqlcmd exit code $LASTEXITCODE). Is the mssql container up?" }
@@ -179,7 +105,6 @@ function Invoke-Migrator($Target) {
     $builder['User ID'] = 'sa'
     $builder['Password'] = $SaPassword
 
-    # Same keys as ../database/src/LocalDeploy.ps1 and the Octopus deploy
     $context = "{'dealer_ref':'$($Target.DealerRef)', 'dealer_database_prefix':'${DbPrefix}_', " +
                "'productcatalogue_database':'$ProductCatalogue', 'supportcentre_database':'$SupportCentre', " +
                "'nservicebus_database':'$NServiceBus', 'environment':'$Environment', 'dealer_group':'$DealerGroup'}"
@@ -188,12 +113,10 @@ function Invoke-Migrator($Target) {
                    '/target', (Join-Path $bin "$($Projects[$Target.Kind]).dll"), '/tag', 'DbMigration', '/context', $context)
     if ($Preview) { $arguments += '/preview' }
 
-    # Shown as it runs and kept for the summary. Migrate.exe masks the password in its own output ("Password=********")
     $lines = New-Object System.Collections.Generic.List[string]
     & (Join-Path $bin 'Migrate.exe') @arguments 2>&1 | ForEach-Object { $line = "$_"; $lines.Add($line); Write-Host $line }
     if ($LASTEXITCODE -ne 0) { throw "Migrate.exe failed on [$($Target.Name)] (exit code $LASTEXITCODE) - see the output above. Databases after it were not migrated." }
 
-    # "202610141400: _202610141400_PD15618_... migrated", maintenance steps (RecreateSynonyms ...) have no number
     return @($lines | Where-Object { $_ -match '^\d{12,}: .+ migrated$' } | ForEach-Object { ($_ -split ': ')[1] -replace ' migrated$', '' })
 }
 
@@ -205,7 +128,6 @@ function Invoke-Compose {
 }
 
 function Restart-Containers {
-    # Same as ops-local.bat config-restart, then noodles-restart: noodles read their configuration from config-api at startup
     Write-Step 'Recreating config-api'
     Invoke-Compose @('compose', '-f', 'docker-compose.api.yml', 'up', '-d', '--force-recreate', '--no-deps', 'config-api') 'Recreating config-api'
 
@@ -244,9 +166,6 @@ function Restart-IisAppPools {
     }
 }
 
-# ---------------------------------------------------------------------------
-# 1. Checks
-# ---------------------------------------------------------------------------
 Write-Step 'Checks'
 if (-not (Test-Path -LiteralPath (Join-Path $MigratorSrc "$($Projects['Dealer'])\$($Projects['Dealer']).csproj"))) {
     throw "The database repository is not at $DatabaseRepo. Clone EurofficeGroup database there or pass -Workspace."
@@ -260,9 +179,6 @@ Write-Host "  database repo: $DatabaseRepo (branch: $branch)"
 Write-Host "  SQL Server:    localhost,$SqlPort   prefix: ${DbPrefix}_   environment: $Environment   dealer group: $DealerGroup"
 if ($Preview) { Write-Host '  PREVIEW: nothing is written to the databases.' -ForegroundColor Yellow }
 
-# ---------------------------------------------------------------------------
-# 2. Build
-# ---------------------------------------------------------------------------
 if ($SkipBuild) {
     Write-Step 'Build skipped (-SkipBuild)'
 }
@@ -278,9 +194,6 @@ foreach ($kind in $Projects.Keys) {
     if (-not (Test-Path -LiteralPath (Join-Path (Get-BinFolder $kind) 'Migrate.exe'))) { throw "Migrate.exe is missing in $(Get-BinFolder $kind) - run without -SkipBuild." }
 }
 
-# ---------------------------------------------------------------------------
-# 3. Databases
-# ---------------------------------------------------------------------------
 Write-Step 'Databases'
 $targets = @(Get-LocalDatabases)
 if ($Database) {
@@ -294,9 +207,6 @@ if (-not $targets) { throw "No databases with the prefix ${DbPrefix}_ found. Has
 
 $targets | ForEach-Object { Write-Host ("  {0,-30} {1}" -f $_.Name, $_.Kind) }
 
-# ---------------------------------------------------------------------------
-# 4. Migrate
-# ---------------------------------------------------------------------------
 $summary = @()
 foreach ($target in $targets) {
     Write-Step "Migrating $($target.Name) ($($target.Kind))"
@@ -315,9 +225,6 @@ foreach ($row in $summary) {
     }
 }
 
-# ---------------------------------------------------------------------------
-# 5. Restart (-Restart)
-# ---------------------------------------------------------------------------
 $appliedCount = ($summary | ForEach-Object { $_.Migrations.Count } | Measure-Object -Sum).Sum
 if ($Preview) {
     if ($Restart) { Write-Host ''; Write-Host '-Restart ignored in preview mode.' }

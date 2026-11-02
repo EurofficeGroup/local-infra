@@ -22,17 +22,12 @@ rem    rename-refs             Re-run 30-rename-db-references.sql
 rem    reset-tasks             Clear stale scheduled tasks + recreate noodles
 rem    core-restart            Restart mssql rabbit redis mailpit
 rem    search-on               Local search stack: elastic + search-api + noodles-searches,
-rem                            configuration switched to them (search-local.ps1 -Mode On)
+rem                            configuration switched to them, product index rebuild started
+rem                            (search-local.ps1 -Mode On); search-on skip-index = no rebuild
 rem    search-off              Back to TEST4 search; stops the search containers
 rem    search-rebuild          search-on, rebuilding the search-api / noodles-searches images
 rem    search-status           Search containers, configuration values and indices
 rem    search-reset            Unstick the indexer: empty its queue, clear its saga state
-rem    db-migrate [preview|restart]
-rem                            Build ../database and apply its pending migrations to the
-rem                            local product catalogue, dealer and support-centre databases
-rem                            (migrate-local.ps1); preview = list and show SQL, write nothing;
-rem                            restart = then recreate config-api + noodles and recycle the
-rem                            IIS app pools (elevated prompt for the app pools)
 rem    power                   Re-apply local settings to the Power web.configs
 rem                            power-local-setup.ps1 - needs Administrator
 rem    help                    Show this list
@@ -247,7 +242,14 @@ if /i "%ACTION%"=="search-on"      set "SEARCH_MODE=On"
 if /i "%ACTION%"=="search-off"     set "SEARCH_MODE=Off"
 if /i "%ACTION%"=="search-rebuild" set "SEARCH_MODE=Rebuild"
 if /i "%ACTION%"=="search-reset"   set "SEARCH_MODE=Reset"
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0search-local.ps1" -Mode %SEARCH_MODE%
+set "SEARCH_ARGS="
+if /i "%SVC_ARG%"=="skip-index" set "SEARCH_ARGS=-SkipIndex"
+if not "%SVC_ARG%"=="" if not defined SEARCH_ARGS (
+  echo ERROR: unknown option '%SVC_ARG%' - use: ops-local.bat search-on^|search-rebuild [skip-index]
+  call :fail_pause
+  exit /b 1
+)
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0search-local.ps1" -Mode %SEARCH_MODE% %SEARCH_ARGS%
 if errorlevel 1 (
   echo ERROR: search-local.ps1 -Mode %SEARCH_MODE% failed - the reason is printed above.
   call :fail_pause
@@ -368,9 +370,10 @@ echo   overrides                Re-run 20-docker-overrides.sql
 echo   rename-refs              Re-run 30-rename-db-references.sql
 echo   reset-tasks              reset-scheduled-tasks.ps1
 echo   core-restart             Restart mssql rabbit redis mailpit
-echo   search-on                Local Elasticsearch + search API + indexer; config switched to them
+echo   search-on [skip-index]   Local Elasticsearch + search API + indexer; config switched to them;
+echo                            starts a product index rebuild unless skip-index
 echo   search-off               Back to TEST4 search, search containers stopped
-echo   search-rebuild           search-on with a rebuild of the search-api / noodles-searches images
+echo   search-rebuild [skip-index] search-on with a rebuild of the search-api / noodles-searches images
 echo   search-status            Search containers, configuration and indices
 echo   search-reset             Unstick the indexer after an aborted rebuild or a restore
 echo   db-migrate [preview^|restart]

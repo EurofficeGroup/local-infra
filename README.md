@@ -16,7 +16,7 @@ They share the external network `hostnet`, created by `power`, so start `power` 
 
 Docker Desktop has no nested groups, so there is no common parent group above the three.
 
-The `search` profile (Elasticsearch, the search API and its indexer) is off by default; see [Local search](#local-search-elasticsearch).
+The `search` profile (Elasticsearch, the search API and its indexer) is not started by a plain `docker compose up`; `setup-local.bat` brings it up and builds the product index unless `--skip-search`. See [Local search](#local-search-elasticsearch).
 
 ## Quick start
 
@@ -49,7 +49,9 @@ Options:
 | `--skip-pull` | Step 5 clones missing repos but does not `git pull` the existing ones |
 | `--apis` | No longer needed - the satellite APIs are always cloned (if missing), built and started. Still accepted. |
 | `--power` | Run `power-local-setup.ps1` at the end (needs IIS sites + WebConfigPicker) |
-| `--search` | Also bring up the local search stack after noodles (`search-local.ps1 -Mode On`, see [Local search](#local-search-elasticsearch)). Needed again after every restore |
+| `--skip-search` | No local search stack: the sites keep using TEST4's search. Without it the script brings up the search stack after noodles and starts the product index rebuild (`search-local.ps1 -Mode On`, see [Local search](#local-search-elasticsearch)); also skipped with `--skip-noodles` |
+| `--skip-search-index` | Search stack, but no product index rebuild (`search-local.ps1 -SkipIndex`) |
+| `--search` | No longer needed - search is set up by default. Still accepted. |
 
 ---
 
@@ -84,7 +86,7 @@ Runtime config for DB-driven keys is **not** read from `appsettings.json` — it
 | `clone-apis.ps1` | Step 5 of `setup-local.bat` | Clones `noodles`, `api.configuration` and the five API repos if missing; `git pull --ff-only` on clean ones, never touches local changes (`-NoPull` / `--skip-pull` to skip). `-Search` adds `search` and `integrations` |
 | `power-local-setup.ps1` | After WebConfigPicker, or whenever the Power `web.config`s were reset (elevated) | Sets `ConfigurationUrl`, `ForceIntegratedSecurity=false`, local API URLs, local Redis/RabbitMQ, and `Environment` / `DealerGroup` / `DealerId` from `.env`. Also `ops-local.bat power` |
 | `sql/init/40-search-local.sql` / `41-search-remote.sql` | Through `search-local.ps1` only | Switch the search configuration (`SearchApiServiceUrl`, Elasticsearch connection strings, synonym transport) to the local containers and back |
-| `search-local.ps1` | `ops-local.bat search-*`, `setup-local.bat --search` | Local search stack on / off / rebuild / status, in the safe order - see [Local search](#local-search-elasticsearch) |
+| `search-local.ps1` | `ops-local.bat search-*`, `setup-local.bat` (step 7b, unless `--skip-search`) | Local search stack on / off / rebuild / status, in the safe order; `On` also starts the product index rebuild unless `-SkipIndex` - see [Local search](#local-search-elasticsearch) |
 | `migrate-local.ps1` | After writing or pulling a migration in `../database` | Builds the three migrator projects of `../database` (Debug) and applies their pending migrations to `<prefix>_productcatalogue`, every dealer database and `<prefix>_supportcentre`; `-Preview` writes nothing, `-Restart` then restarts config-api, noodles and the IIS app pools. Also `ops-local.bat db-migrate [preview|restart]` - see [Database migrations](#database-migrations) |
 | `setup-local.bat` | From scratch | Runs the above in order (except manual Power) |
 | `ops-local.bat` | Day-to-day | Rebuild/restart noodles, config-api, APIs; re-run overrides; reset tasks; local search on/off |
@@ -238,6 +240,14 @@ docker compose -f docker-compose.api.yml up -d
 
 After every restore: `sta_ScheduledTasks` still holds TEST4 addresses (`test4.pow.noodles.*`). The script clears those tables and `--force-recreate`s noodles so services re-register with local addresses.
 
+### 7b. Local search
+
+```bat
+ops-local.bat search-on
+```
+
+Elasticsearch, the search API and the indexer, the search configuration switched to them, and a product index rebuild for `INFRA_DEALER_CODE` - see [Local search](#local-search-elasticsearch). `setup-local.bat` runs it unless `--skip-search` (or `--skip-noodles`); `--skip-search-index` keeps the stack but leaves out the rebuild. Needs the VPN for the first build of its two images and about 2.7 GB more memory.
+
 ### 8. Power (on the host)
 
 Power sites are **not** containerised. They run under IIS (.NET Framework 4.7.2) and have **no** business-database connection string of their own. They call the Configuration API; that API reads `dbo.cfg_Configurations` from the restored support-centre DB and returns connection strings. Local data follows automatically once `ConfigurationUrl` points at the local `config-api` (which already sees `Data Source=mssql,1433` after `20-docker-overrides.sql`).
@@ -361,18 +371,26 @@ One dealer's product index is ~120k documents / ~300 MB, so it fits comfortably.
 ops-local.bat search-on
 ```
 
-It clones `../search` and `../integrations` if missing, creates `files\elastic\synonyms.txt`, starts `elastic`, runs `sql/init/40-search-local.sql`, recreates config-api, builds the two images if missing (VPN), and starts `search-api` and `noodles-searches`. Then, once:
+It clones `../search` and `../integrations` if missing, starts `elastic`, runs `sql/init/40-search-local.sql`, recreates config-api, builds the two images if missing (VPN), starts `search-api` and `noodles-searches`, and starts a product index rebuild for `INFRA_DEALER_CODE`: it sends `noodles-searches` the same `StartDealerReindexMessage` that **Start Product index Export** on http://admin/Dev/SearchEngine sends, through the RabbitMQ management API. To keep the existing index and skip the rebuild:
+
+```bat
+ops-local.bat search-on skip-index
+```
+
+If a rebuild for the dealer is already marked running in `<prefix>_nservicebus` (restored from TEST4, or aborted), `search-on` sends nothing and warns: run `ops-local.bat search-reset`, then `search-on` again (see below).
+
+Then, once:
 
 1. If you set up before this existed: re-run `.\hosts-setup.ps1` elevated, so `search-api` resolves to `127.0.0.1` (the script warns if it does not).
 2. Recycle the app pools of `wfe`, `portal` and `admin` - Power caches `SearchApiServiceUrl`.
-3. Build the index: http://admin → select the dealer (Dealer Map → Just Office, or http://admin/Dealer/Impersonate/1700000000 for JST) → http://admin/Dev/SearchEngine → **Start Product index Export**. Follow `docker logs -f noodles-searches`; `ops-local.bat search-status` lists the indices (`product_localpow_jst_<n>` behind the alias `product_localpow_jst`; green, no replicas - `search-on` puts an index template `local-infra-single-node` with `number_of_replicas: 0` on `product_*` / `smart_*`).
+3. Follow the rebuild: `docker logs -f noodles-searches`; `ops-local.bat search-status` lists the indices (`product_localpow_jst_<n>` behind the alias `product_localpow_jst`; green, no replicas - `search-on` puts an index template `local-infra-single-node` with `number_of_replicas: 0` on `product_*` / `smart_*`). Another dealer, or a rebuild by hand: http://admin → select the dealer (Dealer Map → Just Office, or http://admin/Dealer/Impersonate/1700000000 for JST) → http://admin/Dev/SearchEngine → **Start Product index Export**.
 4. Optional, same page: **Populate Synonym File For Product Index** writes the real synonym list into `files\elastic\synonyms.txt`.
 
 From then on the indexer keeps the index current: a custom list uploaded in the PSP appears on the storefront with its products.
 
 ### Stuck indexer: `ops-local.bat search-reset`
 
-A rebuild runs as a saga in `<prefix>_nservicebus`. It refuses to start while another one is marked running (`EX007` in `docker logs noodles-searches`), and while it runs it sets `UpdatesLocked` on the product-index upkeep saga, which postpones every live update (custom list uploads included) until the rebuild finishes. A restore brings TEST4's saga rows along, with whatever state TEST4 had at backup time; a rebuild aborted halfway (container stopped, `search-off`) leaves `UpdatesLocked=1` behind. `search-reset` stops `noodles-searches`, empties its queues, deletes the product-reindex saga rows, clears `UpdatesLocked` and starts it again; then start a rebuild. Indices are not touched.
+A rebuild runs as a saga in `<prefix>_nservicebus`. It refuses to start while another one is marked running (`EX007` in `docker logs noodles-searches`), and while it runs it sets `UpdatesLocked` on the product-index upkeep saga, which postpones every live update (custom list uploads included) until the rebuild finishes. A restore brings TEST4's saga rows along, with whatever state TEST4 had at backup time; a rebuild aborted halfway (container stopped, `search-off`) leaves `UpdatesLocked=1` behind. `search-reset` stops `noodles-searches`, empties its queues, deletes the product-reindex saga rows, clears `UpdatesLocked` and starts it again; then start a rebuild (`ops-local.bat search-on`). Indices are not touched.
 
 ### Switch off
 
@@ -388,7 +406,7 @@ Stops `noodles-searches` and `search-api`, puts the TEST4 values back (`41-searc
 |---|---|
 | `ElasticSearchConnectionString` (and `ElasticSearchUpdateConnectionString` if present) | `http://elastic:9200` |
 | `SearchApiServiceUrl` | `http://search-api:9012/Search/` |
-| `ElasticSearch.SynonymFilePathOnNodes` | `eo/synonyms.txt` (relative to the node's config folder; `./files/elastic` is mounted as `config/eo`) |
+| `ElasticSearch.SynonymFilePathOnNodes` | `eo/synonyms.txt` (relative to the node's config folder; `./files/elastic` is mounted as `config/eo`; the `elastic` entrypoint creates an empty file on every start if it is missing, because a product index cannot open without it) |
 | `ElasticSearch.ProductIndexPrefix` | `local<group>` (`test4pow` -> `localpow`), so local indices are `product_localpow_<dealer>_<n>` and cannot be mistaken for TEST4's |
 | `tra_Transports` rows with `Method=ElasticNodes` | `Method=File`, folder `/files/elastic`, file `synonyms.txt` |
 
@@ -401,7 +419,7 @@ A product index rebuild **creates a new index, moves the alias and deletes the o
 - `search-api` and `noodles-searches` get `ElasticSearchConnectionString` / `ElasticSearchUpdateConnectionString` = `http://elastic:9200` as **environment variables** in compose. The configuration client lets the process environment win over config-api, so these containers can only reach the local node whatever the database says. Do not remove them.
 - `search-local.ps1` switches the database (connection strings, `SearchApiServiceUrl`, synonym transport) **before** it starts the containers.
 
-After `setup-local.bat --wipe` or any restore the database is TEST4's again: run `ops-local.bat search-on` again (or pass `--search` to `setup-local.bat`).
+After `setup-local.bat --wipe` or any restore the database is TEST4's again: `setup-local.bat` runs `search-on` again by itself (unless `--skip-search`); after a restore by hand run `ops-local.bat search-on`.
 
 ---
 
@@ -448,7 +466,7 @@ docker inspect <container> --format "{{.RestartCount}}"
 7. **Power without explicit Rabbit/Cache** can still fall back to remote values from the DB.
 8. **`power/docker-compose.yml` and this stack** share ports — do not run both.
 9. No local Azure Files equivalent; paths are repointed to `/files` inside containers.
-10. **Power and noodles share one data bus folder.** File uploads from the PSP and PDFs travel as NServiceBus data bus files. Noodles reads `/files/...`; Power on Windows gets the same folder as `<local-infra>\files\...` through `cfg_Service` rows for `portal`, `frontend`, `support`, `suppliers` (the Support site's `ServiceName` in its Web.config), `static`, `datamanagement` and `genericprocess` (section 4 of `20-docker-overrides.sql`, path substituted by `setup-local.bat` / `ops-local.bat`). Power writes keys as `yyyy-MM-dd_HH\guid`; noodles (`DataBusKeySeparatorBehaviour`) turns the `\` into `/` by itself when `Environment` is `local` (`INFRA_ENVIRONMENT=local`) and it is not running on Windows, i.e. in Docker; no configuration key needed. Run from Rider on Windows, it reads the `\` keys as they are. Symptom without it: uploads never finish and `noodles-uploaders` logs `DirectoryNotFoundException ... /files/fshare-...\<guid>`.
+10. **Power and noodles share one data bus folder.** File uploads from the PSP and PDFs travel as NServiceBus data bus files. Noodles reads `/files/...`; Power on Windows gets the same folder as `<local-infra>\files\...` through `cfg_Service` rows for `portal`, `frontend`, `support`, `suppliers` (the Support site's `ServiceName` in its Web.config), `static`, `datamanagement` and `genericprocess` (section 4 of `20-docker-overrides.sql`, path substituted by `setup-local.bat` / `ops-local.bat`). Power writes keys as `yyyy-MM-dd_HH\guid`; in the containers the `\` would be part of the file name. The noodles image fixes that with a local-infra startup hook, `docker/noodles-hooks` (`LocalInfra.NoodlesHooks.dll`, loaded through `DOTNET_STARTUP_HOOKS` in `docker/noodles.Dockerfile`): it registers an NServiceBus behavior that turns the `\` in data bus headers into `/`. Nothing for this lives in the noodles repository and no configuration key is needed; each container logs `local-infra: WindowsDataBusKeyBehavior registered` at start. Run from Rider on Windows, noodles reads the `\` keys as they are. Symptom without it: uploads never finish and `noodles-uploaders` logs `DirectoryNotFoundException ... /files/fshare-...\<guid>`.
 
 ---
 
@@ -516,9 +534,9 @@ Typical loop after the stack is healthy:
 | Stale scheduled-task reply addresses | `ops-local.bat reset-tasks` |
 | Core infra only (SQL / Rabbit / Redis / Mailpit) | `ops-local.bat core-restart` |
 | Power `web.config`s lost their local settings (elevated prompt) | `ops-local.bat power` |
-| Want list/search products from the local DB on the storefront | `ops-local.bat search-on`, then the product index export - see [Local search](#local-search-elasticsearch) |
+| Want list/search products from the local DB on the storefront | `ops-local.bat search-on` (it starts the product index export) - see [Local search](#local-search-elasticsearch) |
 | `../search` or `../integrations` source | `ops-local.bat search-rebuild` |
-| Rebuild refused (`EX007`), or list uploads never reach the storefront | `ops-local.bat search-reset`, then the product index export again |
+| Rebuild refused (`EX007`), or list uploads never reach the storefront | `ops-local.bat search-reset`, then `ops-local.bat search-on` again |
 | Wrote or pulled a migration in `../database` | `ops-local.bat db-migrate preview`, then `ops-local.bat db-migrate` (or `db-migrate restart` if it changes configuration or CMS content) - see [Database migrations](#database-migrations) |
 
 ### How to run
@@ -541,6 +559,7 @@ ops-local.bat reset-tasks
 ops-local.bat core-restart
 ops-local.bat power
 ops-local.bat search-on
+ops-local.bat search-on skip-index
 ops-local.bat search-status
 ops-local.bat search-off
 ops-local.bat search-rebuild

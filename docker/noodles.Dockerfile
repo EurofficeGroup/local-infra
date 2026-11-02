@@ -23,6 +23,9 @@ FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
 WORKDIR /src
 COPY NuGet.Config ./
 
+COPY --from=hooks . /hooks/
+RUN dotnet publish /hooks/LocalInfra.NoodlesHooks.csproj -c Release -o /app/hooks --no-self-contained
+
 # Project files first, so a code change does not invalidate the restore layer.
 COPY src/ src/
 # JSON form: the path contains a space, and the shell form cannot express that.
@@ -70,6 +73,8 @@ ENV NOODLES_SERVICE=Noodles.Sales
 
 # Set by compose; listed here so the image documents what it expects.
 ENV DOTNET_ENVIRONMENT=Development
+
+ENV DOTNET_STARTUP_HOOKS=/app/hooks/LocalInfra.NoodlesHooks.dll
 
 # exec so the app is PID 1 and receives SIGTERM directly - otherwise
 # `docker compose stop` waits out the timeout and kills it.

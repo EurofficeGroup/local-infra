@@ -185,14 +185,20 @@ services:
   # On TEST4 noodles-transport puts that file on each node over SFTP; here the
   # transport row is switched to a plain file write into ./files/elastic
   # (sql/init/40-search-local.sql), and that folder is mounted below as
-  # config/eo. search-local.ps1 creates an empty synonyms.txt first, because
-  # an index cannot be created while the file is missing.
+  # config/eo. The entrypoint creates an empty synonyms.txt on every start if
+  # it is missing, because an index cannot be opened while the file is missing.
   # ==================================================================
   elastic:
     profiles: ["search", "all"]
     container_name: elastic
     image: docker.elastic.co/elasticsearch/elasticsearch:${ELASTIC_VERSION}
     restart: unless-stopped
+    entrypoint:
+      - /bin/sh
+      - -c
+      - '[ -f config/eo/synonyms.txt ] || : > config/eo/synonyms.txt; exec /bin/tini -- /usr/local/bin/docker-entrypoint.sh "$$@"'
+      - elastic
+    command: ["eswrapper"]
     environment:
       - discovery.type=single-node
       - bootstrap.memory_lock=false

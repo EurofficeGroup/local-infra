@@ -59,3 +59,9 @@ venv/
 
 # --- Docker local noise ---
 *.override.local.yml
+
+# --- Runtime files shared by Power and the containers (./files:/files) ---
+files/
+
+docker/noodles-hooks/bin/
+docker/noodles-hooks/obj/

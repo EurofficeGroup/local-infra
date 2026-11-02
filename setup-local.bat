@@ -12,7 +12,8 @@ rem    setup-local.bat
 rem    setup-local.bat --wipe
 rem    setup-local.bat --skip-hosts --skip-build
 rem    setup-local.bat --power
-rem    setup-local.bat --search      also the local search stack (ops-local.bat search-on)
+rem    setup-local.bat --skip-search         without the local search stack (ops-local.bat search-on)
+rem    setup-local.bat --skip-search-index   search stack, but no product index rebuild
 rem
 rem  On failure the script prints the concrete cause, how to fix it, recent
 rem  container logs where relevant, and the right command to retry with.
@@ -28,7 +29,9 @@ set "SKIP_NOODLES=0"
 set "DO_APIS=0"
 set "SKIP_PULL=0"
 set "DO_POWER=0"
-set "DO_SEARCH=0"
+set "DO_SEARCH=1"
+set "ASKED_SEARCH=0"
+set "SEARCH_ARGS="
 
 rem Error report fields, read by :fail (see Helpers).
 set "ORIG_ARGS=%*"
@@ -49,9 +52,11 @@ if /i "%~1"=="--skip-noodles" set "SKIP_NOODLES=1" & shift & goto parse_args
 if /i "%~1"=="--apis"         set "DO_APIS=1"      & shift & goto parse_args
 if /i "%~1"=="--skip-pull"    set "SKIP_PULL=1"    & shift & goto parse_args
 if /i "%~1"=="--power"        set "DO_POWER=1"     & shift & goto parse_args
-if /i "%~1"=="--search"       set "DO_SEARCH=1"    & shift & goto parse_args
+if /i "%~1"=="--search"       set "ASKED_SEARCH=1" & shift & goto parse_args
+if /i "%~1"=="--skip-search"  set "DO_SEARCH=0"    & shift & goto parse_args
+if /i "%~1"=="--skip-search-index" set "SEARCH_ARGS=-SkipIndex" & shift & goto parse_args
 set "ERR_MSG=Unknown argument: %~1"
-set "ERR_HINT=Usage: setup-local.bat [--wipe] [--skip-hosts] [--skip-restore] [--skip-build] [--skip-noodles] [--skip-pull] [--apis] [--power] [--search]"
+set "ERR_HINT=Usage: setup-local.bat [--wipe] [--skip-hosts] [--skip-restore] [--skip-build] [--skip-noodles] [--skip-pull] [--apis] [--power] [--skip-search] [--skip-search-index]"
 set "ORIG_ARGS="
 goto fail
 :args_done
@@ -326,16 +331,21 @@ if "%SKIP_NOODLES%"=="1" (
   )
 )
 
-rem ---------- 7b. local search optional ----------
+rem ---------- 7b. local search ----------
 rem After the restore and noodles: 40-search-local.sql needs the restored support
 rem centre, and the new image builds need the same VPN as step 5. A restore
 rem brings TEST4's search values back, so this has to run after every one.
-if "%DO_SEARCH%"=="1" (
-  echo [7b] Local search stack - search-local.ps1 -Mode On ...
-  powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0search-local.ps1" -Mode On
+if "%ASKED_SEARCH%"=="1" echo Note: --search is no longer needed - the search stack is set up by default.
+if "%DO_SEARCH%"=="0" (
+  echo [7b] Skipping local search stack --skip-search
+) else if "%SKIP_NOODLES%"=="1" (
+  echo [7b] Skipping local search stack noodles not started
+) else (
+  echo [7b] Local search stack - search-local.ps1 -Mode On %SEARCH_ARGS% ...
+  powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0search-local.ps1" -Mode On %SEARCH_ARGS%
   if errorlevel 1 (
     set "ERR_MSG=[7b] search-local.ps1 -Mode On failed - the reason is printed above."
-    set "ERR_HINT=Fix it, then run only this step:  ops-local.bat search-on"
+    set "ERR_HINT=Fix it, then run only this step:  ops-local.bat search-on   or set up without search: --skip-search"
     set "ERR_HINT2=Build errors = VPN off, or ../search / ../integrations on a broken branch."
     goto fail
   )

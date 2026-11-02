@@ -301,10 +301,6 @@ INSERT INTO #flat (name, value) VALUES
     -- locally, so turn the filter off.
     (N'FilterEmails',            N'false');
 
--- Data bus keys need no row here: Power on Windows writes them as
--- 'yyyy-MM-dd_HH\guid', and noodles (DataBusKeySeparatorBehaviour) swaps the '\'
--- for '/' on its own when Environment = local and it is not on Windows (Docker).
-
 -- Keys deliberately NOT touched:
 --   ElasticSearchConnectionString, SearchApiServiceUrl, the synonym transport row
 --                        - left on TEST4's search here. Not repointed on purpose: the
@@ -424,7 +420,6 @@ SELECT NULL, NULL, f.name, f.value
 
 PRINT N'Endpoint values added: ' + CAST(@@ROWCOUNT AS NVARCHAR(10));
 
--- Former data bus key switches; noodles now checks Environment = local and reads neither
 DELETE FROM dbo.cfg_Configurations
  WHERE cfg_Name IN (N'NServiceBusDataBusNormalizeKeys', N'LocalInfra.NServiceBusDataBusNormalizeKeys');
 
